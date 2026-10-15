@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 
 export async function connectDB() {
+  if (mongoose.connection.readyState >= 1) return;
+
   try {
     const mongoUri = process.env.MONGO_URI;
 
@@ -13,7 +15,5 @@ export async function connectDB() {
     console.log("MongoDB connected", conn.connection.host);
   } catch (error) {
     console.error("MongoDB connection error:", error.message);
-    process.exit(1);
-    // 1 means failed, 0 means success
   }
 }

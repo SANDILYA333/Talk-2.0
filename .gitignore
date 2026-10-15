@@ -1,0 +1,186 @@
+# ==============================================================================
+# Dependencies & Package Managers
+# ==============================================================================
+node_modules/
+.pnp/
+.pnp.js
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.pnpm-store/
+
+# ==============================================================================
+# Environment & Secrets (Never commit credentials)
+# ==============================================================================
+.env
+.env.*
+*.env
+*.local
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Preserve example/template environment files
+!.env.example
+!.env.*.example
+!.env.sample
+
+# ==============================================================================
+# Production & Build Outputs
+# ==============================================================================
+dist/
+dist-ssr/
+build/
+out/
+*.tsbuildinfo
+
+# ==============================================================================
+# Caches & Runtime Data
+# ==============================================================================
+.cache/
+.parcel-cache/
+.vite/
+.eslintcache
+.stylelintcache
+*.pid
+*.pid.lock
+*.seed
+
+# Temp and upload directories
+tmp/
+temp/
+uploads/
+
+# ==============================================================================
+# Logs & Diagnostic Outputs
+# ==============================================================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ==============================================================================
+# Testing & Code Coverage
+# ==============================================================================
+coverage/
+*.lcov
+.nyc_output/
+.playwright/
+test-results/
+
+# ==============================================================================
+# Operating System Files
+# ==============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+
+# ==============================================================================
+# IDEs & Editor Configuration
+# ==============================================================================
+# JetBrains (WebStorm, IntelliJ IDEA, etc.)
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# Visual Studio / Windows tools
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Vim / Emacs / Sublime
+*.swp
+*.swo
+*.swn
+*~
+*.sublime-project
+*.sublime-workspace
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+node_modules 
+.env
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Learning/
+Plan/
+
+# Graphify artifacts and outputs
+graphify-out/
+.graphify*
+*.graphify*

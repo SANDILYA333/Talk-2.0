@@ -115,7 +115,38 @@ This is what separates "encrypted" from "encrypted *and* authenticated" — exac
 
 ---
 
-## 6. Sealed Sender / Metadata Minimization
+## 6. Secure API Key Sharing (Zero-Trust Sealed Envelope)
+
+**What it does**
+Lets users share an API key (or any secret) with another user without the key ever touching your server. Sender encrypts the key with the recipient's X25519 public key; only ciphertext + nonce + sender's ephemeral public key are stored in MongoDB. Recipient decrypts with their own private key, which never leaves IndexedDB.
+
+**What finish looks like**
+A "Share Secret" button in the composer. User pastes a key, it is encrypted client-side, sent as a sealed envelope. Recipient sees a "Decrypt & Copy" card. Opening the message shows the key; the server log shows only ciphertext.
+
+**How it improves the app**
+WhatsApp cannot do this — it has no keypair identity and no zero-trust secret transfer. This is a genuinely unique feature that differentiates TALK from every clone and is a strong, specific interview talking point: *"zero-trust secret sharing via X25519 ECDH + AES-256-GCM sealed envelopes."*
+
+**How to implement it**
+- Use X25519 ECDH (via `@noble/curves` or `SubtleCrypto`) to derive a shared secret between sender's private key and recipient's public key.
+- Derive an AES-256-GCM key from the shared secret via HKDF (fixed salt + info string `"talk-key-share-v1"`).
+- Encrypt the key with AES-GCM; store `ciphertext`, `nonce` (12 bytes), sender's `ephemeralPubKey`, and a `kid` (short fingerprint of the key for rotation, never the key itself) in a new `securePayload` field on the Message document.
+- Decrypt on the client using the recipient's private key + sender's public key.
+- Server route is intentionally boring: save and relay the envelope, never decrypt, never log it.
+- Mark the envelope `consumed: true` after first decrypt so the same ciphertext cannot be re-read on a new device.
+
+**Resources**
+- **OpenAI / Claude / Gemini prompt:** *"Show me how to encrypt a secret with a recipient's X25519 public key using the Web Crypto API — derive an AES-256-GCM key via HKDF from the ECDH shared secret, encrypt, and decrypt on the recipient side using a private key stored in IndexedDB."*
+- **YouTube:** [End-to-End Encrypted Chat with the Web Crypto API](https://www.youtube.com/GSIDS_lvRv4)
+
+**Warnings**
+- The key never touches the server in plaintext. If it does, the app becomes a key-leak vault and every audit fails.
+- A MITM who intercepts the envelope can swap in their own public key and read the key you send. Pair this with safety-number verification: recipient must confirm the sender's identity out-of-band before pasting real keys.
+- No server-side recovery: if the recipient loses their private key, the shared secret is gone — that is the whole point of E2E. Tell the user this in the UI.
+- This is a one-time transfer, not a vault. Do not let users store keys in TALK and expect them to survive a device wipe.
+
+---
+
+## 7. Sealed Sender / Metadata Minimization
 
 **What it does**
 Restructures your server so it can relay messages without knowing *who is talking to whom* — only that ciphertext moved from one socket to another.
@@ -230,8 +261,9 @@ Most apps leak message previews to the push provider (Apple/Google servers techn
 2. **Double Ratchet E2E** (your core security story)
 3. **Disappearing messages** + **Encrypted local storage** (cheap wins, same sprint)
 4. **Safety numbers** (small, high credibility)
-5. **WebRTC calls** (visible, demo-friendly)
-6. **Group Sender Keys**
-7. **Sealed sender**
-8. **Silent push**
-9. **Offline mesh** (save for last — hardest, and the one you want fresh in memory for interviews)
+5. **Secure API key sharing** (needs the keypair from step 1 and the E2E envelope from step 2 — drop it in here)
+6. **WebRTC calls** (visible, demo-friendly)
+7. **Group Sender Keys**
+8. **Sealed sender**
+9. **Silent push**
+10. **Offline mesh** (save for last — hardest, and the one you want fresh in memory for interviews)

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { axiosInstance } from "../lib/axios";
 import { io } from "socket.io-client";
+import { useChatStore } from "./useChatStore";
 
 const BASE_URL = import.meta.env.MODE === "development" ? "http://localhost:3000" : "/";
 
@@ -17,7 +18,7 @@ export const useAuthStore = create((set, get) => ({
       const res = await axiosInstance.get("/auth/check");
       set({ authUser: res.data });
 
-      get().connectSocket(res.data);
+      get().connectSocket();
     } catch (error) {
       console.error("Error in checkAuth:", error);
       set({ authUser: null });
@@ -31,12 +32,16 @@ export const useAuthStore = create((set, get) => ({
     get().disconnectSocket();
   },
 
-  connectSocket: (user) => {
-    if (!user || get().socket?.connected) return;
+  connectSocket: () => {
+    if (get().socket?.connected) return;
 
-    const socket = io(BASE_URL, { query: { userId: user._id } });
+    const socket = io(BASE_URL, {
+      auth: async (cb) => cb({ token: await window.Clerk?.session?.getToken() }),
+    });
 
     set({ socket });
+
+    useChatStore.getState().listenForMessages();
 
     socket.on("getOnlineUsers", (userIds) => {
       set({ onlineUsers: userIds });

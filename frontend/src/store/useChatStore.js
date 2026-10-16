@@ -80,6 +80,17 @@ export const useChatStore = create(
         }
       },
 
+      listenForMessages: () => {
+        const socket = useAuthStore.getState().socket;
+        if (!socket) return;
+        socket.off("newMessage");
+        socket.on("newMessage", (msg) => {
+          const { selectedUser, messages } = get();
+          if (selectedUser?._id === msg.senderId) set({ messages: [...messages, msg] });
+          get().getConversations(); // refresh the sidebar for every incoming message
+        });
+      },
+
       subscribeToMessages: (userId) => {
         if (!userId) return;
 

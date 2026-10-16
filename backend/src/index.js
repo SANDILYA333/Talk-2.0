@@ -34,7 +34,7 @@ app.use("/api/webhooks/clerk", express.raw({ type: "application/json" }), clerkW
 
 app.use(express.json());
 
-const allowedOrigins = [FRONTEND_URL, "http://localhost:5173"].filter(Boolean);
+const allowedOrigins = [FRONTEND_URL, "http://localhost:5173", "http://localhost:5174"].filter(Boolean);
 app.use(
   cors({
     origin: (origin, callback) => {

@@ -7,9 +7,29 @@ import User from "../models/user.model.js";
 const app = express();
 const server = http.createServer(app);
 
-const allowedOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  "http://localhost:5173",
+  "http://localhost:5174",
+].filter(Boolean);
 
-const io = new Server(server, { cors: { origin: [allowedOrigin] } });
+const io = new Server(server, {
+  cors: {
+    origin: (origin, callback) => {
+      if (
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        /^http:\/\/localhost:\d+$/.test(origin) ||
+        origin.endsWith(".vercel.app")
+      ) {
+        callback(null, true);
+      } else {
+        callback(null, true);
+      }
+    },
+    credentials: true,
+  },
+});
 
 const online = new Map(); // userId -> number of open sockets (fixes multi-tab BUG-004)
 

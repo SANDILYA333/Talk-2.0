@@ -113,7 +113,13 @@ export const useChatStore = create(
         socket?.off("newMessage");
       },
 
-      setSelectedUser: (selectedUser) => set({ selectedUser }),
+      setSelectedUser: (selectedUser) =>
+        set((state) => ({
+          selectedUser,
+          activeConversationId: selectedUser?._id ?? null,
+          messages:
+            selectedUser && selectedUser._id !== state.activeConversationId ? [] : state.messages,
+        })),
 
       setActiveConversationId: (activeConversationId) => {
         set((state) => ({
@@ -121,7 +127,7 @@ export const useChatStore = create(
           selectedUser:
             state.users.find((user) => user._id === activeConversationId) ||
             state.conversations.find((user) => user._id === activeConversationId) ||
-            null,
+            (state.selectedUser?._id === activeConversationId ? state.selectedUser : null),
           messages: activeConversationId ? state.messages : [],
         }));
       },

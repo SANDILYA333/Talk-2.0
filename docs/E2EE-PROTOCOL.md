@@ -190,3 +190,37 @@ No IK migration. New code uses @noble/curves and @noble/hashes only.
 - Legacy dev messages are wiped by script before S5.
 - talk-safety-v2 ships in S4 with SIK upload; verified flags reset once.
 
+## Amendments (S1.2)
+- GET /api/keys/bundle/:userId consumes a one-time prekey ONLY when
+  query opk=1. Default: no OPK in the response (opk: null).
+- GET /api/keys/bundle/:userId returns 404 {message:"recipient-no-keys"}
+  when the user has no identity or no bundle; 400 for own id or bad id;
+  409 "recipient-keys-stale" if the stored IK binding no longer verifies
+  against User.publicKey. Response never contains email.
+- Response: { userId, ikPub, sikPub, ikBinding, spk:{id,pub,sig},
+  opk:{id,pub}|null, protoMax }. ikPub comes from User.publicKey.
+- PUT /api/keys/bundle body { sik, ikBinding, spk:{id,pub,sig},
+  protoMax? (1|2, default 1) }. Server verifies ikBinding over the
+  CURRENT User.publicKey and spk.sig, using canonical base64 and exact
+  lengths (32/64). spk.id: integer 1..2^32-1.
+  Same sik: id must be > stored id, or == with identical pub (idempotent).
+  Different sik (identity reset): accepted, all of the user's OPKs deleted.
+- POST /api/keys/opks { keys:[{id,pub}] } 1..100 per call, max 100
+  stored per user. Same id + same pub = skipped (idempotent). Same id +
+  different pub = 409 "opk-conflict". Over cap = 409 "opk-cap".
+  Needs an existing bundle (else 409 "no-bundle").
+- GET /api/keys/opks/count -> { count }.
+- PUT /api/identity with replace:true and a CHANGED publicKey deletes the
+  user's KeyBundle and OneTimePrekeys.
+- GET /api/identity/key/:userId additionally returns sik (null if no
+  bundle yet).
+- Rate limits: bundle fetch 20/min per user; bundle PUT and OPK POST
+  30/min per user.
+- Safety number v2: prefix "talk-safety-v2"; each party is
+  IK(32)||SIK(32); the two 64-byte blobs are sorted bytewise; digest
+  SHA-512; 12 groups of 5 digits as in v1.
+- Pinned contact record: { ik, sik, verified }. Legacy { key, verified }
+  is read as ik=key, sik=null. On first sight of a peer's sik the record
+  is upgraded and verified resets to false (UI says the format changed).
+  A peer with no sik yet has status "no-keys" and nothing is pinned.
+

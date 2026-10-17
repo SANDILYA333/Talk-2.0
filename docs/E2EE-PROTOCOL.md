@@ -155,3 +155,38 @@ Reply with **"approve all"**, or change any of these:
 Heads-up: I can't prove this design is safe. It follows the Signal spec, but a crypto review is worth asking for before you call it production-grade. In interviews, say "implemented to the Signal spec, using vetted primitives, with test vectors." 🚀
 
 After "approve all" comes **S2**: the crypto core as pure functions with tests written first.
+
+## Amendments (S1.1)
+
+### A. Canonical byte encodings
+- u32be(n): 4-byte big-endian unsigned integer.
+- ids (senderId, receiverId): 24-char lowercase hex string, UTF-8 (24 bytes).
+- type codes: text=1, media=2, secret=3 (single byte).
+- All keys: raw 32 bytes in signed/hashed inputs, base64 on the wire.
+
+### B. Signature messages
+- SPK sig:     SIK signs  utf8("talk-spk-v1") || u32be(spkId) || spkPub(32)
+- IK binding:  SIK signs  utf8("talk-ik-v1")  || IK(32)
+
+### C. AEAD associated data (replaces the string form in section 5)
+AAD = utf8("talk/aad/v1") || u8(v) || u8(typeCode)
+      || utf8(senderId)(24) || utf8(receiverId)(24)
+      || IK_sender(32) || IK_receiver(32)
+All fields after the label are fixed width, so no delimiter ambiguity.
+
+### D. Identity upgrade for existing users
+Stored record identity:<uid> keeps IK (publicKey, secretKey, base64).
+Add field sik: { pub, priv } (base64) in place. Never regenerate IK.
+Upgrade runs once at login if sik is missing.
+
+### E. Key libraries
+Existing tweetnacl X25519 keys are valid noble X25519 keys (raw 32 bytes).
+No IK migration. New code uses @noble/curves and @noble/hashes only.
+
+### F. Scope notes
+- Sidebar preview comes from the client plaintext cache, fallback
+  "Encrypted message".
+- S5 is text only. Media UI is disabled until S7.
+- Legacy dev messages are wiped by script before S5.
+- talk-safety-v2 ships in S4 with SIK upload; verified flags reset once.
+

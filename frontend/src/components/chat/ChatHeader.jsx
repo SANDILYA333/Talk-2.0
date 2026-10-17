@@ -32,7 +32,7 @@ export function ChatHeader() {
     setTrust(null);
     (async () => {
       const { data } = await axiosInstance.get(`/identity/key/${selectedUser._id}`);
-      const t = await checkContact(authUser._id, selectedUser._id, data.publicKey);
+      const t = await checkContact(authUser._id, selectedUser._id, { ik: data.publicKey, sik: data.sik });
       if (!off) setTrust(t);
     })().catch(() => {
       if (!off) setTrust(null);
@@ -79,10 +79,14 @@ export function ChatHeader() {
                 <button
                   type="button"
                   onClick={() => setShowSafety(true)}
-                  disabled={!trust}
+                  disabled={!trust || trust.status === "no-keys"}
                   className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2 py-0.5 text-xs font-medium cursor-pointer hover:bg-muted/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {trust?.verified ? "🔒 Verified" : "🔓 Verify"}
+                  {trust?.status === "no-keys"
+                    ? "⏳ No keys yet"
+                    : trust?.verified
+                    ? "🔒 Verified"
+                    : "🔓 Verify"}
                 </button>
               </div>
               <p className="truncate text-xs text-muted">
@@ -141,6 +145,12 @@ export function ChatHeader() {
         </div>
       </header>
 
+      {trust?.upgraded && selectedUser && (
+        <div className="flex items-center justify-between gap-2 border-b border-amber-300 bg-amber-100 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/70 dark:text-amber-200">
+          <span>Safety number format updated. Verify again.</span>
+        </div>
+      )}
+
       {trust?.status === "changed" && selectedUser && (
         <div className="flex items-center justify-between gap-2 border-b border-red-300 bg-red-100 px-3 py-2 text-sm text-red-900 dark:border-red-900/50 dark:bg-red-950/70 dark:text-red-200">
           <span>
@@ -150,7 +160,7 @@ export function ChatHeader() {
             type="button"
             className="shrink-0 font-medium underline cursor-pointer hover:text-red-950 dark:hover:text-red-100"
             onClick={async () => {
-              await acceptKeyChange(authUser._id, selectedUser._id, trust.peerKey);
+              await acceptKeyChange(authUser._id, selectedUser._id, trust.peerKeys);
               setTrust({ ...trust, status: "ok", verified: false });
             }}
           >

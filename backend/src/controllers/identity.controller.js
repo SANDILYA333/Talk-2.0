@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 import User from "../models/user.model.js";
+import KeyBundle from "../models/keyBundle.model.js";
+import OneTimePrekey from "../models/oneTimePrekey.model.js";
 import { deriveConnectCode, normalizeConnectCode } from "../lib/connectCode.js";
 
 const isValidKey = (k) =>
@@ -19,6 +21,12 @@ export const setIdentity = async (req, res) => {
 
     const connectCode = deriveConnectCode(publicKey);
     await User.findByIdAndUpdate(req.user._id, { publicKey, connectCode });
+    if (existing.publicKey && existing.publicKey !== publicKey) {
+      await Promise.all([
+        KeyBundle.deleteOne({ userId: req.user._id }),
+        OneTimePrekey.deleteMany({ userId: req.user._id }),
+      ]);
+    }
     res.json({ connectCode, publicKey });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ message: "Key already registered" });
@@ -46,9 +54,12 @@ export const lookupByCode = async (req, res) => {
 export const getKeyById = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.userId)) return res.status(400).json({ message: "Bad id" });
-    const u = await User.findById(req.params.userId).select("publicKey connectCode");
+    const [u, kb] = await Promise.all([
+      User.findById(req.params.userId).select("publicKey connectCode"),
+      KeyBundle.findOne({ userId: req.params.userId }).select("sik"),
+    ]);
     if (!u?.publicKey) return res.status(404).json({ message: "No identity yet" });
-    res.json({ publicKey: u.publicKey, connectCode: u.connectCode });
+    res.json({ publicKey: u.publicKey, connectCode: u.connectCode, sik: kb?.sik ?? null });
   } catch (err) {
     console.error("getKeyById:", err.message);
     res.status(500).json({ message: "Internal server error" });

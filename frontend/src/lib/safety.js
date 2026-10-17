@@ -7,16 +7,17 @@ function cmp(x, y) {
   for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i];
   return 0;
 }
+function cat(...a) {
+  const out = new Uint8Array(a.reduce((n, x) => n + x.length, 0));
+  let o = 0;
+  for (const x of a) { out.set(x, o); o += x.length; }
+  return out;
+}
 
-export async function safetyNumber(keyA, keyB) {
-  const [a, b] = [unb64(keyA), unb64(keyB)].sort(cmp);
-  const prefix = enc.encode("talk-safety-v1");
-  const input = new Uint8Array(prefix.length + a.length + b.length);
-  input.set(prefix);
-  input.set(a, prefix.length);
-  input.set(b, prefix.length + a.length);
-
-  const h = new Uint8Array(await crypto.subtle.digest("SHA-512", input));
+// mine / theirs: { ik, sik } base64. Symmetric: parties are sorted before hashing.
+export async function safetyNumber(mine, theirs) {
+  const parties = [cat(unb64(mine.ik), unb64(mine.sik)), cat(unb64(theirs.ik), unb64(theirs.sik))].sort(cmp);
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-512", cat(enc.encode("talk-safety-v2"), ...parties)));
   const groups = [];
   for (let i = 0; i < 60; i += 5) {
     let n = 0;
@@ -28,20 +29,26 @@ export async function safetyNumber(keyA, keyB) {
 
 const k = (me, peer) => `contact:${me}:${peer}`;
 
-export async function checkContact(me, peer, currentKey) {
+// cur: { ik, sik } from the server. status: "new" | "ok" | "changed" | "no-keys"
+export async function checkContact(me, peer, cur) {
+  if (!cur?.sik) return { status: "no-keys", verified: false, peerKeys: cur };
   const rec = await get(k(me, peer));
   if (!rec) {
-    await set(k(me, peer), { key: currentKey, verified: false });
-    return { status: "new", verified: false, peerKey: currentKey };
+    await set(k(me, peer), { ik: cur.ik, sik: cur.sik, verified: false });
+    return { status: "new", verified: false, peerKeys: cur };
   }
-  if (rec.key !== currentKey) {
-    return { status: "changed", verified: rec.verified, peerKey: currentKey };
+  const oldIk = rec.ik ?? rec.key; // legacy G0 shape
+  if (oldIk !== cur.ik) return { status: "changed", verified: !!rec.verified, peerKeys: cur };
+  if (!rec.sik) {
+    await set(k(me, peer), { ik: cur.ik, sik: cur.sik, verified: false });
+    return { status: "ok", verified: false, upgraded: rec.verified === true, peerKeys: cur };
   }
-  return { status: "ok", verified: rec.verified, peerKey: currentKey };
+  if (rec.sik !== cur.sik) return { status: "changed", verified: !!rec.verified, peerKeys: cur };
+  return { status: "ok", verified: !!rec.verified, peerKeys: cur };
 }
 
-export const markVerified = (me, peer, key) =>
-  set(k(me, peer), { key, verified: true, at: Date.now() });
+export const markVerified = (me, peer, keys) =>
+  set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: true, at: Date.now() });
 
-export const acceptKeyChange = (me, peer, key) =>
-  set(k(me, peer), { key, verified: false });
+export const acceptKeyChange = (me, peer, keys) =>
+  set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: false });

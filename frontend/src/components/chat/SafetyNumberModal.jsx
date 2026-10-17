@@ -1,17 +1,21 @@
 import { useEffect, useState } from "react";
-import { get } from "idb-keyval";
+import { loadIdentity } from "../../storage/keystore";
+import { toB64 } from "../../crypto/index.js";
 import { safetyNumber, markVerified } from "../../lib/safety";
 
 export default function SafetyNumberModal({ open, onClose, me, peer, trust, onChange }) {
   const [groups, setGroups] = useState(null);
 
   useEffect(() => {
-    if (!open || !trust) return;
+    if (!open || !trust?.peerKeys) return;
     let off = false;
     (async () => {
-      const mine = await get(`identity:${me?._id}`);
-      if (!mine || off) return;
-      const g = await safetyNumber(mine.publicKey, trust.peerKey);
+      const idn = await loadIdentity(me?._id);
+      if (!idn?.sik || off) return;
+      const g = await safetyNumber(
+        { ik: toB64(idn.ik.pub), sik: toB64(idn.sik.pub) },
+        trust.peerKeys
+      );
       if (!off) setGroups(g);
     })();
     return () => {
@@ -22,7 +26,7 @@ export default function SafetyNumberModal({ open, onClose, me, peer, trust, onCh
   if (!open) return null;
 
   const verify = async () => {
-    await markVerified(me._id, peer._id, trust.peerKey);
+    await markVerified(me._id, peer._id, trust.peerKeys);
     onChange({ ...trust, status: "ok", verified: true });
   };
 

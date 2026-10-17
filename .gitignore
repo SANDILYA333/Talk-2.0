@@ -185,3 +185,4 @@ graphify-out/
 .graphify*
 *.graphify*
 notes.md
+audit_output/

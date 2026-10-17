@@ -3,6 +3,7 @@ import { axiosInstance } from "../lib/axios";
 import { io } from "socket.io-client";
 import { useChatStore } from "./useChatStore";
 import { ensureIdentity } from "../lib/identity";
+import { bootKeys } from "../lib/keysBoot";
 
 const BASE_URL = import.meta.env.MODE === "development" ? "http://localhost:3000" : "/";
 
@@ -21,7 +22,11 @@ export const useAuthStore = create((set, get) => ({
       set({ authUser: res.data });
 
       try {
-        set({ identity: await ensureIdentity(res.data) });
+        const identity = await ensureIdentity(res.data);
+        set({ identity });
+        if (identity.status === "ok") {
+          bootKeys(res.data._id).catch((e) => console.error("keys:", e));
+        }
       } catch (e) {
         console.error("identity:", e);
       }

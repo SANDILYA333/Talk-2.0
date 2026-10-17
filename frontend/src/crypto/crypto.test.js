@@ -228,4 +228,10 @@ describe("v1 encrypt / decrypt", () => {
     const eve = generateIdentity();
     await expect(recv(w, m, { myIk: eve.ik })).rejects.toBeTruthy();
   });
+  it("accepts an async getSpkPriv", async () => {
+    const w = world();
+    const m = await send(w);
+    const out = await recv(w, m, { getSpkPriv: async (id) => (id === 7 ? w.spkB.priv : null) });
+    expect(out.body).toBe("hi");
+  });
 });

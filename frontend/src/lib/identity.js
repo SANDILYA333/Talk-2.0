@@ -1,6 +1,8 @@
 import nacl from "tweetnacl";
 import { get, set } from "idb-keyval";
 import { axiosInstance } from "./axios";
+import { wipeKeyMaterial } from "../storage/keystore";
+import { bootKeys } from "./keysBoot";
 
 const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -65,7 +67,9 @@ export async function resetIdentity(authUser) {
   const pair = nacl.box.keyPair();
   const kp = { publicKey: toB64(pair.publicKey), secretKey: toB64(pair.secretKey) };
   const { data } = await axiosInstance.put("/identity", { publicKey: kp.publicKey, replace: true });
+  await wipeKeyMaterial(authUser._id);
   await set(keyName(authUser), kp);
+  await bootKeys(authUser._id);
   return { status: "ok", connectCode: data.connectCode };
 }
 

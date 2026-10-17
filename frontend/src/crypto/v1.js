@@ -56,7 +56,7 @@ export async function encryptV1({ envelope, type, senderId, receiverId, myIk, bu
 export async function decryptV1({ msg, senderId, receiverId, myIk, getSpkPriv, senderIkPub }) {
   if (msg?.v !== 1) throw new CryptoError("unsupported-version");
   try {
-    const spkPriv = getSpkPriv(msg.header?.spkId);
+    const spkPriv = await getSpkPriv(msg.header?.spkId);
     if (!spkPriv) throw new CryptoError("undecryptable");
 
     const ekPub = fromB64(msg.header.ek);

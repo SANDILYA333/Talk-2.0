@@ -1,8 +1,11 @@
+import { useState } from "react";
 import { getInitials, useSelectedConversation } from "../../hooks/useSelectedConversation";
 import { useAuthStore } from "../../store/useAuthStore";
 import { useChatStore } from "../../store/useChatStore";
 import { APP_NAME, AppLogo } from "../AppLogo";
 import { UserButton } from "@clerk/react";
+import ConnectIdModal from "./ConnectIdModal";
+import AddByCodeModal from "./AddByCodeModal";
 
 import { SearchField, Tabs } from "@heroui/react";
 import { MessageSquareIcon, UsersIcon } from "lucide-react";
@@ -38,8 +41,14 @@ function ChatSidebar() {
   const setSidebarTab = useChatStore((state) => state.setSidebarTab);
 
   const setActiveConversationId = useChatStore((state) => state.setActiveConversationId);
+  const setSelectedUser = useChatStore((state) => state.setSelectedUser);
 
+  const authUser = useAuthStore((state) => state.authUser);
+  const identity = useAuthStore((state) => state.identity);
   const onlineUsers = useAuthStore((state) => state.onlineUsers);
+
+  const [showId, setShowId] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
 
   const { activeConversationId, isLargeScreen } = useSelectedConversation();
 
@@ -70,13 +79,31 @@ function ChatSidebar() {
           <p className="flex-1 truncate text-lg font-bold tracking-tight sm:text-[22px]">
             {APP_NAME}
           </p>
-          <UserButton
-            appearance={{
-              elements: {
-                avatarBox: "size-8",
-              },
-            }}
-          />
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setShowId(true)}
+              className="rounded-lg border border-border bg-surface px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted/10 cursor-pointer"
+              title="Show my Connect ID"
+            >
+              My ID
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAdd(true)}
+              className="rounded-lg border border-primary/20 bg-primary/10 px-2 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary/20 cursor-pointer"
+              title="Add friend by code"
+            >
+              + Add
+            </button>
+            <UserButton
+              appearance={{
+                elements: {
+                  avatarBox: "size-8",
+                },
+              }}
+            />
+          </div>
         </div>
       </div>
 
@@ -150,6 +177,19 @@ function ChatSidebar() {
           )}
         </Tabs.Panel>
       </Tabs>
+
+      <ConnectIdModal
+        open={showId}
+        onClose={() => setShowId(false)}
+        authUser={authUser}
+        identity={identity}
+        onIdentityChange={(i) => useAuthStore.setState({ identity: i })}
+      />
+      <AddByCodeModal
+        open={showAdd}
+        onClose={() => setShowAdd(false)}
+        onContactFound={(contact) => setSelectedUser(contact)}
+      />
     </aside>
   );
 }

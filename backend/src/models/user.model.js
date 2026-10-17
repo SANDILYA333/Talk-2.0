@@ -20,6 +20,16 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    publicKey: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+    connectCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
   },
   { timestamps: true }, // createdAt & updatedAt
 );

@@ -15,6 +15,7 @@ import job from "./lib/cron.js";
 import clerkWebhook from "./webhooks/clerk.webhook.js";
 import authRoutes from "./routes/auth.route.js";
 import messageRoutes from "./routes/message.route.js";
+import identityRoutes from "./routes/identity.route.js";
 import { app, server } from "./lib/socket.js";
 
 const PORT = process.env.PORT || 3000;
@@ -33,7 +34,7 @@ app.use("/api/webhooks/clerk", express.raw({ type: "application/json" }), clerkW
 
 app.use(express.json());
 
-const allowedOrigins = [FRONTEND_URL, "http://localhost:5173"].filter(Boolean);
+const allowedOrigins = [FRONTEND_URL, "http://localhost:5173", "http://localhost:5174"].filter(Boolean);
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -54,6 +55,7 @@ app.get(["/health", "/api/health"], (req, res) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/identity", identityRoutes);
 
 // if the public directory exists, serve the static files
 // this is for standalone/docker production builds

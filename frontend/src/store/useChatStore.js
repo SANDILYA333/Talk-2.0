@@ -80,6 +80,17 @@ export const useChatStore = create(
         }
       },
 
+      listenForMessages: () => {
+        const socket = useAuthStore.getState().socket;
+        if (!socket) return;
+        socket.off("newMessage");
+        socket.on("newMessage", (msg) => {
+          const { selectedUser, messages } = get();
+          if (selectedUser?._id === msg.senderId) set({ messages: [...messages, msg] });
+          get().getConversations(); // refresh the sidebar for every incoming message
+        });
+      },
+
       subscribeToMessages: (userId) => {
         if (!userId) return;
 
@@ -102,7 +113,13 @@ export const useChatStore = create(
         socket?.off("newMessage");
       },
 
-      setSelectedUser: (selectedUser) => set({ selectedUser }),
+      setSelectedUser: (selectedUser) =>
+        set((state) => ({
+          selectedUser,
+          activeConversationId: selectedUser?._id ?? null,
+          messages:
+            selectedUser && selectedUser._id !== state.activeConversationId ? [] : state.messages,
+        })),
 
       setActiveConversationId: (activeConversationId) => {
         set((state) => ({
@@ -110,7 +127,7 @@ export const useChatStore = create(
           selectedUser:
             state.users.find((user) => user._id === activeConversationId) ||
             state.conversations.find((user) => user._id === activeConversationId) ||
-            null,
+            (state.selectedUser?._id === activeConversationId ? state.selectedUser : null),
           messages: activeConversationId ? state.messages : [],
         }));
       },

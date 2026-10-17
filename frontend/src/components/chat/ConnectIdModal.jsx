@@ -52,7 +52,9 @@ export default function ConnectIdModal({ open, onClose, authUser, identity, onId
             </button>
           </>
         ) : (
-          <p className="mb-4 text-sm">Setting up your identity…</p>
+          <p className="mb-4 text-sm">
+            {identity?.status === "error" ? "Could not set up identity. Reload and try again." : "Setting up your identity…"}
+          </p>
         )}
 
         {needsReset && (

@@ -67,6 +67,7 @@ export function useSelectedConversation() {
   return {
     activeConversation,
     activeConversationId,
+    selectedUser,
     isLargeScreen,
   };
 }

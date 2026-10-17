@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import User from "../models/user.model.js";
 import Message from "../models/message.model.js";
 import { hasImageKitConfig, uploadChatMedia } from "../lib/imagekit.js";
@@ -48,24 +49,33 @@ export async function getConversationsForSidebar(req, res) {
   }
 }
 
-export async function getMessages(req, res) {
+export const getMessages = async (req, res) => {
   try {
-    const { id: userToChatId } = req.params;
+    const otherId = req.params.id;
+    if (!mongoose.isValidObjectId(otherId)) return res.status(400).json({ message: "Bad id" });
+
     const myId = req.user._id;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
 
-    const messages = await Message.find({
+    const query = {
       $or: [
-        { senderId: myId, receiverId: userToChatId },
-        { senderId: userToChatId, receiverId: myId },
+        { senderId: myId, receiverId: otherId },
+        { senderId: otherId, receiverId: myId },
       ],
-    }).sort({ createdAt: 1 });
+    };
+    if (req.query.before) {
+      if (!mongoose.isValidObjectId(req.query.before)) return res.status(400).json({ message: "Bad cursor" });
+      query._id = { $lt: req.query.before };
+    }
 
-    res.status(200).json(messages);
-  } catch (error) {
-    console.error("Error in getMessages:", error.message);
+    const docs = await Message.find(query).sort({ _id: -1 }).limit(limit + 1);
+    const hasMore = docs.length > limit;
+    res.json({ messages: docs.slice(0, limit).reverse(), hasMore });
+  } catch (err) {
+    console.error("getMessages:", err.message);
     res.status(500).json({ message: "Internal server error" });
   }
-}
+};
 
 export async function sendMessage(req, res) {
   try {

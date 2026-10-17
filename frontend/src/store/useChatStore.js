@@ -15,6 +15,8 @@ export const useChatStore = create(
       isConversationsLoading: false,
       isUsersLoading: false,
       isMessagesLoading: false,
+      hasMore: false,
+      isLoadingOlder: false,
       activeConversationId: null,
       searchQuery: "",
       sidebarTab: "chats",
@@ -54,14 +56,32 @@ export const useChatStore = create(
 
       getMessages: async (userId) => {
         if (!userId) return;
-        set({ isMessagesLoading: true });
+        set({ isMessagesLoading: true, hasMore: false });
         try {
-          const res = await axiosInstance.get(`/messages/${userId}`);
-          set({ messages: res.data });
+          const { data } = await axiosInstance.get(`/messages/${userId}?limit=30`);
+          set({ messages: data.messages, hasMore: data.hasMore });
         } catch (error) {
           toast.error(error.response?.data?.message || "Failed to load messages");
         } finally {
           set({ isMessagesLoading: false });
+        }
+      },
+
+      loadOlder: async () => {
+        const { messages, selectedUser, hasMore, isLoadingOlder, activeConversationId } = get();
+        const targetId = selectedUser?._id || activeConversationId;
+        if (!hasMore || isLoadingOlder || !messages.length || !targetId) return;
+        set({ isLoadingOlder: true });
+        try {
+          const { data } = await axiosInstance.get(
+            `/messages/${targetId}?limit=30&before=${messages[0]._id}`
+          );
+          if ((get().selectedUser?._id || get().activeConversationId) !== targetId) return; // switched chat mid-request
+          set({ messages: [...data.messages, ...get().messages], hasMore: data.hasMore });
+        } catch (e) {
+          console.error(e);
+        } finally {
+          set({ isLoadingOlder: false });
         }
       },
 
@@ -119,6 +139,8 @@ export const useChatStore = create(
           activeConversationId: selectedUser?._id ?? null,
           messages:
             selectedUser && selectedUser._id !== state.activeConversationId ? [] : state.messages,
+          hasMore:
+            selectedUser && selectedUser._id !== state.activeConversationId ? false : state.hasMore,
         })),
 
       setActiveConversationId: (activeConversationId) => {
@@ -128,7 +150,8 @@ export const useChatStore = create(
             state.users.find((user) => user._id === activeConversationId) ||
             state.conversations.find((user) => user._id === activeConversationId) ||
             (state.selectedUser?._id === activeConversationId ? state.selectedUser : null),
-          messages: activeConversationId ? state.messages : [],
+          messages: activeConversationId !== state.activeConversationId ? [] : state.messages,
+          hasMore: activeConversationId !== state.activeConversationId ? false : state.hasMore,
         }));
       },
 

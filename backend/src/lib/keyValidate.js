@@ -10,6 +10,13 @@ export function b64Bytes(s, len) {
   return b;
 }
 
+// canonical base64 of any length, else null
+export function b64Decode(s) {
+  if (typeof s !== "string") return null;
+  const b = Buffer.from(s, "base64");
+  return b.toString("base64") === s ? b : null;
+}
+
 export const isU32 = (n) => Number.isInteger(n) && n >= 1 && n <= 0xffffffff;
 
 export function edVerify(sig, msg, pub) {

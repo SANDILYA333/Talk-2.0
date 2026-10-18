@@ -52,3 +52,10 @@ export const markVerified = (me, peer, keys) =>
 
 export const acceptKeyChange = (me, peer, keys) =>
   set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: false });
+
+// normalized pin, or null. Reads the G0 legacy shape too.
+export async function readPin(me, peer) {
+  const r = await get(k(me, peer));
+  return r ? { ik: r.ik ?? r.key, sik: r.sik ?? null, verified: !!r.verified } : null;
+}
+

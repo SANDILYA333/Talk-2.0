@@ -161,6 +161,7 @@ export function ChatHeader() {
             className="shrink-0 font-medium underline cursor-pointer hover:text-red-950 dark:hover:text-red-100"
             onClick={async () => {
               await acceptKeyChange(authUser._id, selectedUser._id, trust.peerKeys);
+              useChatStore.getState().reprocess();
               setTrust({ ...trust, status: "ok", verified: false });
             }}
           >

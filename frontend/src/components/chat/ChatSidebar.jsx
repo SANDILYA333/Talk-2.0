@@ -19,6 +19,7 @@ function mapUserForList(user, onlineUsers) {
     avatarUrl: user.profilePic,
     initials: getInitials(user.fullName),
     isOnline: onlineUsers.includes(user._id),
+    snippet: user.snippet,
     peer: {
       name: user.fullName,
       avatarUrl: user.profilePic,
@@ -31,7 +32,6 @@ function mapUserForList(user, onlineUsers) {
 function ChatSidebar() {
   const conversations = useChatStore((state) => state.conversations);
 
-  console.log(conversations);
   const users = useChatStore((state) => state.users);
 
   const searchQuery = useChatStore((state) => state.searchQuery);

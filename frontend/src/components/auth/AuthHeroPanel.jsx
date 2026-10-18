@@ -46,7 +46,7 @@ export function AuthHeroPanel() {
         </div>
 
         <p className="text-center font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-[#636366] md:text-left">
-          End-to-end session · Encrypted in transit
+          End-to-end encrypted · Encrypted in transit
         </p>
       </div>
     </section>

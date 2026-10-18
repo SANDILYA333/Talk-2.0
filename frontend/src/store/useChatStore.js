@@ -4,6 +4,11 @@ import { persist } from "zustand/middleware";
 import { axiosInstance } from "../lib/axios";
 import { useAuthStore } from "./useAuthStore";
 import toast from "react-hot-toast";
+import { encryptText, toItem, snippetFor } from "../lib/chatCrypto";
+import { putPlain } from "../storage/keystore";
+
+const meId = () => useAuthStore.getState().authUser?._id;
+const RETRYABLE = new Set(["key-changed", "waiting-for-key", "undecryptable", "tampered"]);
 
 export const useChatStore = create(
   persist(
@@ -36,7 +41,7 @@ export const useChatStore = create(
                 : null,
           }));
         } catch (error) {
-          console.log("Error in get Users", error.message);
+          console.error("Error in getUsers:", error.message);
         } finally {
           set({ isUsersLoading: false });
         }
@@ -46,9 +51,14 @@ export const useChatStore = create(
         set({ isConversationsLoading: true });
         try {
           const res = await axiosInstance.get("/messages/conversations");
-          set({ conversations: res.data });
+          const me = meId();
+          const list = Array.isArray(res.data) ? res.data : [];
+          const conversations = await Promise.all(
+            list.map(async (c) => ({ ...c, snippet: await snippetFor(me, c.lastMessage) }))
+          );
+          set({ conversations });
         } catch (error) {
-          console.log("Error in getConversations", error.message);
+          console.error("Error in getConversations:", error.message);
         } finally {
           set({ isConversationsLoading: false });
         }
@@ -59,7 +69,10 @@ export const useChatStore = create(
         set({ isMessagesLoading: true, hasMore: false });
         try {
           const { data } = await axiosInstance.get(`/messages/${userId}?limit=30`);
-          set({ messages: data.messages, hasMore: data.hasMore });
+          const me = meId();
+          const list = Array.isArray(data?.messages) ? data.messages : [];
+          const items = await Promise.all(list.map((m) => toItem(me, m)));
+          set({ messages: items, hasMore: data?.hasMore });
         } catch (error) {
           toast.error(error.response?.data?.message || "Failed to load messages");
         } finally {
@@ -71,13 +84,17 @@ export const useChatStore = create(
         const { messages, selectedUser, hasMore, isLoadingOlder, activeConversationId } = get();
         const targetId = selectedUser?._id || activeConversationId;
         if (!hasMore || isLoadingOlder || !messages.length || !targetId) return;
+        const firstId = messages[0]._id;
+        if (!firstId) return;
         set({ isLoadingOlder: true });
         try {
           const { data } = await axiosInstance.get(
-            `/messages/${targetId}?limit=30&before=${messages[0]._id}`
+            `/messages/${targetId}?limit=30&before=${firstId}`
           );
           if ((get().selectedUser?._id || get().activeConversationId) !== targetId) return; // switched chat mid-request
-          set({ messages: [...data.messages, ...get().messages], hasMore: data.hasMore });
+          const me = meId();
+          const items = await Promise.all((data.messages || []).map((m) => toItem(me, m)));
+          set({ messages: [...items, ...get().messages], hasMore: data.hasMore });
         } catch (e) {
           console.error(e);
         } finally {
@@ -85,45 +102,60 @@ export const useChatStore = create(
         }
       },
 
-      sendMessage: async (messageData) => {
-        const { selectedUser, messages } = get();
-        if (!selectedUser) return false;
+      sendMessage: async (text) => {
+        const { selectedUser } = get();
+        const body = (typeof text === "string" ? text : text?.text ?? "").trim();
+        if (!selectedUser || !body) return false;
+        const me = meId(), peerId = selectedUser._id;
+        const cid = crypto.randomUUID(); // needs https or localhost
+        set((s) => ({
+          messages: [...s.messages, {
+            cid, senderId: me, receiverId: peerId, createdAt: new Date().toISOString(),
+            type: "text", state: "pending", text: body,
+          }],
+          composerText: "",
+        }));
+        await get()._deliver({ cid, me, peerId, text: body });
+        return true;
+      },
 
+      _deliver: async ({ cid, me, peerId, text }) => {
+        const patch = (p) => set((s) => ({ messages: s.messages.map((m) => (m.cid === cid ? { ...m, ...p } : m)) }));
         try {
-          const res = await axiosInstance.post(`/messages/send/${selectedUser._id}`, messageData);
-          set({ messages: [...messages, res.data], composerText: "" });
+          const { payload, envelope } = await encryptText({ me, peerId, text });
+          const { data } = await axiosInstance.post(`/messages/send/${peerId}`, { cid, ...payload });
+          await putPlain(me, data._id, { t: envelope.t, body: envelope.body, ts: envelope.ts }); // cache even if the user left this chat
+          patch({ _id: data._id, createdAt: data.createdAt, state: "ok", failReason: undefined });
           get().getConversations();
-          return true;
-        } catch (error) {
-          toast.error(error.response?.data?.message || "Failed to send message");
-          return false;
+        } catch (e) {
+          patch({ state: "failed", failReason: e.code ?? e.response?.data?.message ?? e.message ?? "network" });
         }
+      },
+
+      retrySend: async (cid) => {
+        const m = get().messages.find((x) => x.cid === cid);
+        if (!m || m.state !== "failed") return;
+        set((s) => ({ messages: s.messages.map((x) => (x.cid === cid ? { ...x, state: "pending", failReason: undefined } : x)) }));
+        await get()._deliver({ cid, me: meId(), peerId: m.receiverId, text: m.text }); // same cid: server dedupes
+      },
+
+      reprocess: async () => {
+        const me = meId();
+        const next = await Promise.all(get().messages.map((it) => (it.raw && RETRYABLE.has(it.state) ? toItem(me, it.raw) : it)));
+        set({ messages: next });
       },
 
       listenForMessages: () => {
         const socket = useAuthStore.getState().socket;
         if (!socket) return;
         socket.off("newMessage");
-        socket.on("newMessage", (msg) => {
-          const { selectedUser, messages } = get();
-          if (selectedUser?._id === msg.senderId) set({ messages: [...messages, msg] });
-          get().getConversations(); // refresh the sidebar for every incoming message
-        });
-      },
-
-      subscribeToMessages: (userId) => {
-        if (!userId) return;
-
-        const socket = useAuthStore.getState().socket;
-        if (!socket) return;
-
-        socket.off("newMessage");
-        socket.on("newMessage", (newMessage) => {
-          // if im not the receiver don't do anything just return
-          if (String(newMessage.senderId) !== String(userId)) return;
-
-          set({ messages: [...get().messages, newMessage] });
-
+        socket.on("newMessage", async (msg) => {
+          const me = meId();
+          if (!me) return;
+          const item = await toItem(me, msg); // decrypts and caches BEFORE the sidebar refresh
+          if (get().selectedUser?._id === msg.senderId) {
+            set((s) => (s.messages.some((m) => m._id === item._id) ? s : { messages: [...s.messages, item] }));
+          }
           get().getConversations();
         });
       },
@@ -163,22 +195,7 @@ export const useChatStore = create(
       sendTextMessage: async (conversationId) => {
         const messageText = get().composerText.trim();
         if (!conversationId || !messageText) return false;
-
-        return get().sendMessage({ text: messageText });
-      },
-
-      sendMediaMessage: async ({ conversationId, file }) => {
-        if (!conversationId || !file) return false;
-
-        const formData = new FormData();
-        formData.append("media", file);
-
-        set({ isSendingMedia: true });
-        try {
-          return await get().sendMessage(formData);
-        } finally {
-          set({ isSendingMedia: false });
-        }
+        return get().sendMessage(messageText);
       },
     }),
     {

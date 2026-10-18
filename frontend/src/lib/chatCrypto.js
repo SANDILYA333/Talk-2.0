@@ -3,10 +3,15 @@ import { fetchBundle } from "./keyApi";
 import { checkContact, readPin } from "./safety";
 import { loadIdentity, getSpkPriv, getPlain, putPlain } from "../storage/keystore";
 import { encryptV1, decryptV1, fromB64, toB64, CryptoError } from "../crypto/index.js";
+import { decryptBlob } from "./mediaCrypto.js";
+import { blobStore } from "./blobStore.js";
+import { validateAttachment } from "./mediaSecurity.js";
 
 const BUNDLE_TTL_MS = 5 * 60_000;
 const bundleCache = new Map(); // peerId -> { at, bundle }
 const pinInflight = new Map(); // senderId -> Promise
+const mediaObjectUrlCache = new Map(); // messageId -> objectUrl
+const MAX_MEDIA_CACHE = 40;
 
 export const clearBundleCache = (peerId) => (peerId ? bundleCache.delete(peerId) : bundleCache.clear());
 
@@ -30,7 +35,7 @@ async function cachedBundle(peerId) {
   }
 }
 
-export async function encryptText({ me, peerId, text }) {
+export async function encryptEnvelope({ me, peerId, type = "text", envelope }) {
   const idn = await loadIdentity(me);
   if (!idn) throw new SendError("no-identity");
 
@@ -41,12 +46,10 @@ export async function encryptText({ me, peerId, text }) {
     clearBundleCache(peerId);
     throw new SendError("key-changed");
   }
-  // "new" and "ok": the stored pin now equals what the server just served
   const pinned = { ik: bundle.ikPub, sik: bundle.sikPub };
 
-  const envelope = { t: "text", body: text, ts: Date.now() };
   try {
-    const payload = await encryptV1({ envelope, type: "text", senderId: me, receiverId: peerId, myIk: idn.ik, bundle, pinned });
+    const payload = await encryptV1({ envelope, type, senderId: me, receiverId: peerId, myIk: idn.ik, bundle, pinned });
     return { payload, envelope };
   } catch (e) {
     if (e instanceof CryptoError) throw new SendError(e.code);
@@ -54,17 +57,30 @@ export async function encryptText({ me, peerId, text }) {
   }
 }
 
+export async function encryptText({ me, peerId, text }) {
+  const envelope = { t: "text", body: text, ts: Date.now() };
+  return encryptEnvelope({ me, peerId, type: "text", envelope });
+}
+
+export async function encryptMedia({ me, peerId, caption = "", att, blobId }) {
+  const envelope = { t: "media", body: caption, ts: Date.now(), att };
+  const res = await encryptEnvelope({ me, peerId, type: "media", envelope });
+  if (blobId) {
+    res.payload.blobId = blobId;
+  }
+  return res;
+}
+
 async function currentKeys(peerId) {
   const { data } = await axiosInstance.get(`/identity/key/${peerId}`);
   return { ik: data.publicKey, sik: data.sik };
 }
 
-// first contact: fetch once per sender, pin, return the pin (null if the sender has no keys yet)
 function fetchAndPin(me, senderId) {
   if (!pinInflight.has(senderId)) {
     const p = (async () => {
       const cur = await currentKeys(senderId);
-      await checkContact(me, senderId, cur); // pins on first sight
+      await checkContact(me, senderId, cur);
       return readPin(me, senderId);
     })().finally(() => pinInflight.delete(senderId));
     pinInflight.set(senderId, p);
@@ -72,13 +88,32 @@ function fetchAndPin(me, senderId) {
   return pinInflight.get(senderId);
 }
 
-// -> { state, text?, ts? }
-// state: ok | undecryptable | tampered | key-changed | unsupported-version | waiting-for-key
+function toSafeAtt(att) {
+  if (!att) return undefined;
+  return {
+    kind: att.kind,
+    mime: att.mime,
+    size: att.size,
+    w: att.w,
+    h: att.h,
+    dur: att.dur,
+    ph: att.ph,
+  };
+}
+
 export async function readMessage({ me, msg }) {
   const hit = await getPlain(me, msg._id);
-  if (hit) return { state: "ok", text: hit.body, ts: hit.ts };
+  if (hit) {
+    return {
+      state: "ok",
+      text: hit.body ?? "",
+      ts: hit.ts,
+      type: hit.t || msg.type || "text",
+      att: toSafeAtt(hit.att),
+    };
+  }
 
-  if (msg.senderId === me) return { state: "undecryptable" }; // sent from another device / cache cleared
+  if (msg.senderId === me) return { state: "undecryptable" };
   if (msg.v !== 1) return { state: "unsupported-version" };
 
   const idn = await loadIdentity(me);
@@ -94,10 +129,23 @@ export async function readMessage({ me, msg }) {
     const env = await decryptV1({
       msg, senderId: msg.senderId, receiverId: me, myIk: idn.ik,
       getSpkPriv: (id) => getSpkPriv(me, id),
-      senderIkPub: fromB64(pin.ik), // the pin, never anything from the message
+      senderIkPub: fromB64(pin.ik),
     });
-    await putPlain(me, msg._id, { t: env.t, body: env.body, ts: env.ts });
-    return { state: "ok", text: env.body, ts: env.ts };
+
+    if (env.t === "media") {
+      if (!validateAttachment(env.att, blobStore.getEndpoint())) {
+        return { state: "tampered" };
+      }
+    }
+
+    await putPlain(me, msg._id, { t: env.t, body: env.body, ts: env.ts, att: env.att });
+    return {
+      state: "ok",
+      text: env.body ?? "",
+      ts: env.ts,
+      type: env.t,
+      att: toSafeAtt(env.att),
+    };
   } catch (e) {
     const code = e instanceof CryptoError ? e.code : "tampered";
     if (code === "tampered") {
@@ -108,20 +156,79 @@ export async function readMessage({ me, msg }) {
   }
 }
 
-// message wire object -> store item
+export async function loadMedia(me, messageId) {
+  if (!me || !messageId) throw new Error("Missing parameters for loadMedia");
+
+  if (mediaObjectUrlCache.has(messageId)) {
+    return mediaObjectUrlCache.get(messageId);
+  }
+
+  const hit = await getPlain(me, messageId);
+  if (!hit || !hit.att || !hit.att.key || !hit.att.nonce || !hit.att.url) {
+    const err = new Error("Can't open this attachment on this device");
+    err.code = "no-key";
+    throw err;
+  }
+
+  const { att } = hit;
+  const keyBytes = Uint8Array.from(atob(att.key), (c) => c.charCodeAt(0));
+  const nonceBytes = Uint8Array.from(atob(att.nonce), (c) => c.charCodeAt(0));
+
+  const ciphertext = await blobStore.fetch(att.url, { maxBytes: att.size + 16 });
+
+  const plainBytes = await decryptBlob({
+    ciphertext,
+    key: keyBytes,
+    nonce: nonceBytes,
+    declaredSize: att.size,
+  });
+
+  const blob = new Blob([plainBytes], { type: att.mime });
+  const objectUrl = URL.createObjectURL(blob);
+
+  if (mediaObjectUrlCache.size >= MAX_MEDIA_CACHE) {
+    const oldestKey = mediaObjectUrlCache.keys().next().value;
+    const oldUrl = mediaObjectUrlCache.get(oldestKey);
+    URL.revokeObjectURL(oldUrl);
+    mediaObjectUrlCache.delete(oldestKey);
+  }
+
+  mediaObjectUrlCache.set(messageId, objectUrl);
+  return objectUrl;
+}
+
+export function revokeMediaUrl(messageId) {
+  if (mediaObjectUrlCache.has(messageId)) {
+    URL.revokeObjectURL(mediaObjectUrlCache.get(messageId));
+    mediaObjectUrlCache.delete(messageId);
+  }
+}
+
 export async function toItem(me, msg) {
   const r = await readMessage({ me, msg });
   return {
     _id: msg._id, cid: msg.cid, senderId: msg.senderId, receiverId: msg.receiverId,
-    createdAt: msg.createdAt, type: msg.type,
+    createdAt: msg.createdAt, type: r.type || msg.type,
     state: r.state, text: r.text ?? "",
-    raw: r.state === "ok" ? undefined : msg, // kept only so reprocess() can retry
+    att: r.att,
+    raw: r.state === "ok" ? undefined : msg,
   };
 }
 
 export async function snippetFor(me, lastMessage) {
   if (!lastMessage?._id) return "";
   const hit = await getPlain(me, lastMessage._id);
-  if (!hit) return "Encrypted message";
-  return hit.body.length > 80 ? hit.body.slice(0, 79) + "…" : hit.body;
+  if (!hit) {
+    if (lastMessage.type === "media") return "Photo";
+    return "Encrypted message";
+  }
+
+  if (hit.t === "media" || (lastMessage.type === "media" && hit.att)) {
+    const label = hit.att?.kind === "video" ? "Video" : "Photo";
+    return hit.body ? `${label}: ${hit.body}` : label;
+  }
+
+  const text = hit.body ?? "";
+  return text.length > 80 ? text.slice(0, 79) + "…" : text;
 }
+

@@ -10,6 +10,7 @@ const messageSchema = new mongoose.Schema(
     ciphertext: { type: String, required: true },
     nonce: { type: String, required: true },
     header: { type: mongoose.Schema.Types.Mixed, required: true },
+    blobId: { type: String },
     expiresAt: { type: Date },
   },
   { timestamps: true }
@@ -18,6 +19,7 @@ const messageSchema = new mongoose.Schema(
 messageSchema.index({ senderId: 1, receiverId: 1, _id: -1 });
 messageSchema.index({ receiverId: 1, senderId: 1, _id: -1 });
 messageSchema.index({ senderId: 1, cid: 1 }, { unique: true });
+messageSchema.index({ blobId: 1 }, { sparse: true });
 messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0, sparse: true });
 
 export default mongoose.models.Message || mongoose.model("Message", messageSchema);

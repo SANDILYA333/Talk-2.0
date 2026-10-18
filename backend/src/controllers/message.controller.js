@@ -6,7 +6,8 @@ import { emitToUser } from "../lib/socket.js";
 import { b64Bytes, b64Decode, isU32 } from "../lib/keyValidate.js";
 
 const CID_RE = /^[A-Za-z0-9-]{8,64}$/;
-const ALLOWED = new Set(["cid", "v", "type", "ciphertext", "nonce", "header"]);
+const BLOB_ID_RE = /^[a-zA-Z0-9_-]{16,64}$/;
+const ALLOWED = new Set(["cid", "v", "type", "ciphertext", "nonce", "header", "blobId"]);
 const PLAINTEXT_FIELDS = ["text", "image", "video"];
 
 export const toWire = (d) => {
@@ -17,6 +18,7 @@ export const toWire = (d) => {
     receiverId: String(o.receiverId),
     cid: o.cid, v: o.v, type: o.type,
     ciphertext: o.ciphertext, nonce: o.nonce, header: o.header,
+    ...(o.blobId ? { blobId: o.blobId } : {}),
     expiresAt: o.expiresAt ?? null,
     createdAt: o.createdAt,
   };
@@ -30,7 +32,14 @@ function parseSendBody(b) {
   }
   if (typeof b.cid !== "string" || !CID_RE.test(b.cid)) return { message: "bad-cid" };
   if (b.v !== 1) return { message: "unsupported-version" };
-  if (b.type !== "text") return { message: "unsupported-type" };
+
+  if (b.type === "text") {
+    if (b.blobId !== undefined) return { message: "blob-forbidden-on-text" };
+  } else if (b.type === "media") {
+    if (typeof b.blobId !== "string" || !BLOB_ID_RE.test(b.blobId)) return { message: "bad-blob-id" };
+  } else {
+    return { message: "unsupported-type" };
+  }
 
   const ct = b64Decode(b.ciphertext);
   if (!ct || ct.length < 272 || ct.length > 16384 || (ct.length - 16) % 256 !== 0) return { message: "bad-ciphertext" };
@@ -42,7 +51,17 @@ function parseSendBody(b) {
   if (keys.length !== 2 || !keys.includes("ek") || !keys.includes("spkId")) return { message: "bad-header" };
   if (!b64Bytes(h.ek, 32) || !isU32(h.spkId)) return { message: "bad-header" };
 
-  return { doc: { cid: b.cid, v: 1, type: "text", ciphertext: b.ciphertext, nonce: b.nonce, header: { ek: h.ek, spkId: h.spkId } } };
+  return {
+    doc: {
+      cid: b.cid,
+      v: 1,
+      type: b.type,
+      ciphertext: b.ciphertext,
+      nonce: b.nonce,
+      header: { ek: h.ek, spkId: h.spkId },
+      ...(b.blobId ? { blobId: b.blobId } : {}),
+    },
+  };
 }
 
 import ReadState from "../models/readState.model.js";

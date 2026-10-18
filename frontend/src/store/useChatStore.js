@@ -4,12 +4,16 @@ import { persist } from "zustand/middleware";
 import { axiosInstance } from "../lib/axios";
 import { useAuthStore } from "./useAuthStore";
 import toast from "react-hot-toast";
-import { encryptText, toItem, snippetFor } from "../lib/chatCrypto";
+import { encryptText, encryptMedia, toItem, snippetFor } from "../lib/chatCrypto";
+import { processMediaFile } from "../lib/mediaIntake";
+import { encryptBlob } from "../lib/mediaCrypto";
+import { blobStore } from "../lib/blobStore";
 import { putPlain } from "../storage/keystore";
 import { sortConversations } from "../lib/conversationView";
 
 const meId = () => useAuthStore.getState().authUser?._id;
 const RETRYABLE = new Set(["key-changed", "waiting-for-key", "undecryptable", "tampered"]);
+const mediaUploadContexts = new Map(); // cid -> { file, caption, previewUrl, abortController, processed, key, nonce, ciphertext, blobId, uploadedUrl, att }
 
 const DEBOUNCE_DELAY = typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 30 : 300;
 
@@ -77,6 +81,13 @@ export const useChatStore = create(
           clearTimeout(p.timer);
         }
         pendingReadMarkers.clear();
+        for (const ctx of mediaUploadContexts.values()) {
+          if (ctx.abortController) ctx.abortController.abort();
+          if (ctx.previewUrl) {
+            try { URL.revokeObjectURL(ctx.previewUrl); } catch (_) {}
+          }
+        }
+        mediaUploadContexts.clear();
         set({
           messages: [],
           conversations: [],
@@ -343,9 +354,255 @@ export const useChatStore = create(
         }
       },
 
+      sendMedia: async ({ file, caption = "" }) => {
+        const { selectedUser } = get();
+        if (!selectedUser || !file) return false;
+        const me = meId(), peerId = selectedUser._id;
+        const cid = crypto.randomUUID();
+
+        // Enforce 25 MB first
+        if (file.size > 25 * 1024 * 1024) {
+          let previewUrl = null;
+          try {
+            if (typeof URL !== "undefined" && URL.createObjectURL) {
+              previewUrl = URL.createObjectURL(file);
+            }
+          } catch (_) {}
+          set((s) => ({
+            messages: [
+              ...s.messages,
+              {
+                cid,
+                senderId: me,
+                receiverId: peerId,
+                createdAt: new Date().toISOString(),
+                type: "media",
+                state: "failed",
+                failReason: "too-big",
+                text: caption || "",
+                previewUrl,
+              },
+            ],
+          }));
+          return false;
+        }
+
+        let previewUrl = null;
+        try {
+          if (typeof URL !== "undefined" && URL.createObjectURL) {
+            previewUrl = URL.createObjectURL(file);
+          }
+        } catch (_) {}
+
+        const abortController = new AbortController();
+
+        set((s) => ({
+          messages: [
+            ...s.messages,
+            {
+              cid,
+              senderId: me,
+              receiverId: peerId,
+              createdAt: new Date().toISOString(),
+              type: "media",
+              state: "processing",
+              text: caption || "",
+              previewUrl,
+              progress: 0,
+            },
+          ],
+        }));
+
+        const ctx = {
+          cid,
+          me,
+          peerId,
+          file,
+          caption,
+          previewUrl,
+          abortController,
+        };
+        mediaUploadContexts.set(cid, ctx);
+
+        await get()._deliverMedia(ctx);
+        return true;
+      },
+
+      _deliverMedia: async (ctx) => {
+        const { cid, me, peerId, file, caption } = ctx;
+        const patch = (p) => set((s) => ({ messages: s.messages.map((m) => (m.cid === cid ? { ...m, ...p } : m)) }));
+
+        try {
+          if (!ctx.processed) {
+            patch({ state: "processing" });
+            const processed = await processMediaFile(file);
+            ctx.processed = processed;
+          }
+
+          if (!ctx.ciphertext && !ctx.abortController?.signal?.aborted) {
+            patch({ state: "encrypting" });
+            const { ciphertext, key, nonce } = await encryptBlob(ctx.processed.data);
+            ctx.ciphertext = ciphertext;
+            ctx.key = key;
+            ctx.nonce = nonce;
+          }
+
+          if (!ctx.blobId || !ctx.uploadedUrl) {
+            patch({ state: "uploading", progress: 0 });
+            const uploadRes = await blobStore.upload(ctx.ciphertext || new Uint8Array(), {
+              signal: ctx.abortController?.signal,
+              onProgress: (p) => {
+                patch({ progress: p });
+              },
+            });
+            ctx.blobId = uploadRes.blobId;
+            ctx.uploadedUrl = uploadRes.url;
+          }
+
+          if (ctx.abortController?.signal?.aborted) {
+            patch({ state: "cancelled" });
+            return;
+          }
+
+          patch({ state: "sending" });
+
+          const att = {
+            kind: ctx.processed.kind,
+            mime: ctx.processed.mime,
+            size: ctx.processed.size,
+            w: ctx.processed.width,
+            h: ctx.processed.height,
+            url: ctx.uploadedUrl,
+            key: btoa(String.fromCharCode(...ctx.key)),
+            nonce: btoa(String.fromCharCode(...ctx.nonce)),
+            ph: ctx.processed.placeholder,
+          };
+          if (ctx.processed.duration != null) {
+            att.dur = ctx.processed.duration;
+          }
+          ctx.att = att;
+
+          const { payload, envelope } = await encryptMedia({
+            me,
+            peerId,
+            caption: caption || "",
+            att,
+            blobId: ctx.blobId,
+          });
+
+          const { data } = await axiosInstance.post(`/messages/send/${peerId}`, { cid, ...payload });
+          await putPlain(me, data._id, envelope);
+          patch({
+            _id: data._id,
+            createdAt: data.createdAt,
+            state: "ok",
+            failReason: undefined,
+            att: {
+              kind: att.kind,
+              mime: att.mime,
+              size: att.size,
+              w: att.w,
+              h: att.h,
+              dur: att.dur,
+              ph: att.ph,
+            },
+          });
+
+          set((s) => {
+            const partnerId = peerId;
+            const existing = s.conversations.find((c) => c._id === partnerId);
+            const prefix = att.kind === "video" ? "Video" : "Photo";
+            const snippet = caption ? `${prefix}: ${caption}` : prefix;
+            const lastMessage = {
+              _id: data._id,
+              senderId: me,
+              receiverId: peerId,
+              createdAt: data.createdAt,
+              type: "media",
+            };
+
+            let next;
+            if (existing) {
+              next = s.conversations.map((c) =>
+                c._id === partnerId ? { ...c, snippet, lastMessage } : c
+              );
+            } else {
+              next = [
+                {
+                  _id: partnerId,
+                  fullName: s.selectedUser?.fullName || "User",
+                  unreadCount: 0,
+                  snippet,
+                  lastMessage,
+                },
+                ...s.conversations,
+              ];
+            }
+            return { conversations: sortConversations(next) };
+          });
+
+          get().getConversations();
+        } catch (e) {
+          if (ctx.abortController?.signal?.aborted || e.name === "AbortError") {
+            patch({ state: "cancelled" });
+            return;
+          }
+          let failReason = "network";
+          const msg = e.message || "";
+          if (msg === "too-big" || msg.includes("25 MB") || msg.includes("file-too-large")) {
+            failReason = "too-big";
+          } else if (msg.includes("unsupported") || msg.includes("mismatch") || msg.includes("Magic byte")) {
+            failReason = "unsupported-type";
+          } else if (e.code === "recipient-no-keys" || msg.includes("prekey")) {
+            failReason = "recipient-no-keys";
+          } else if (e.code === "key-changed" || msg.includes("identity")) {
+            failReason = "key-changed";
+          } else if (e.response?.data?.message) {
+            failReason = e.response.data.message;
+          } else if (e.code) {
+            failReason = e.code;
+          } else if (msg) {
+            failReason = msg;
+          }
+          patch({ state: "failed", failReason });
+        }
+      },
+
+      cancelMediaUpload: (cid) => {
+        const ctx = mediaUploadContexts.get(cid);
+        if (ctx) {
+          if (ctx.abortController) {
+            ctx.abortController.abort();
+          }
+          if (ctx.previewUrl) {
+            try {
+              URL.revokeObjectURL(ctx.previewUrl);
+            } catch (_) {}
+          }
+          mediaUploadContexts.delete(cid);
+        }
+        set((s) => ({
+          messages: s.messages.map((m) => (m.cid === cid ? { ...m, state: "cancelled" } : m)),
+        }));
+      },
+
       retrySend: async (cid) => {
         const m = get().messages.find((x) => x.cid === cid);
         if (!m || m.state !== "failed") return;
+
+        if (m.type === "media") {
+          const ctx = mediaUploadContexts.get(cid);
+          if (!ctx) return;
+          ctx.abortController = new AbortController();
+          set((s) => ({
+            messages: s.messages.map((x) =>
+              x.cid === cid ? { ...x, state: ctx.blobId ? "sending" : "uploading", failReason: undefined } : x
+            ),
+          }));
+          await get()._deliverMedia(ctx);
+          return;
+        }
+
         set((s) => ({ messages: s.messages.map((x) => (x.cid === cid ? { ...x, state: "pending", failReason: undefined } : x)) }));
         await get()._deliver({ cid, me: meId(), peerId: m.receiverId, text: m.text });
       },

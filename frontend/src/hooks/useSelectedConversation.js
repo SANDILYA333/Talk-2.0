@@ -23,13 +23,17 @@ function mapUserToConversation({ user, messages, authUser, onlineUsers }) {
     id: message._id || message.cid,
     _id: message._id,
     cid: message.cid,
+    senderId: message.senderId,
+    receiverId: message.receiverId,
+    type: message.type || "text",
+    att: message.att,
+    previewUrl: message.previewUrl,
+    progress: message.progress,
     role: String(message.senderId) === String(authUser?._id) ? "me" : "them",
     text: message.text || "",
     state: message.state || "ok",
     failReason: message.failReason,
     time: formatMessageTime(message.createdAt),
-    imageUrl: message.image,
-    videoUrl: message.video,
   }));
 
   return {

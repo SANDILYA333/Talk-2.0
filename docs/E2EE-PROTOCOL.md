@@ -224,3 +224,11 @@ No IK migration. New code uses @noble/curves and @noble/hashes only.
   is upgraded and verified resets to false (UI says the format changed).
   A peer with no sik yet has status "no-keys" and nothing is pinned.
 
+## Amendments (S1.3) - Encrypted media
+- `type: "media"` is accepted, with a required `blobId` (string, strict pattern, e.g. alphanumeric/hex/uuid 16-64 chars). `blobId` is forbidden on text.
+- Media envelope: `{ t:"media", body?: caption, ts, att:{ kind, mime, size, w, h, dur?, url, key, nonce, ph } }`.
+- Blob AAD is the label `talk/blob/v1`. The decrypted length must equal `att.size`.
+- The plaintext cache record also stores `att` (backward compatible with S5 records).
+- Storage file: Random 128-bit name, no extension, no original filename.
+- Direct browser-to-ImageKit upload using short-lived signed params from `GET /api/media/upload-auth`.
+- Provider swap: All blob I/O goes through `blobStore` interface.

@@ -45,6 +45,8 @@ function parseSendBody(b) {
   return { doc: { cid: b.cid, v: 1, type: "text", ciphertext: b.ciphertext, nonce: b.nonce, header: { ek: h.ek, spkId: h.spkId } } };
 }
 
+import ReadState from "../models/readState.model.js";
+
 export async function getUsersForSidebar(req, res) {
   try {
     const loggedInUserId = req.user._id;
@@ -77,13 +79,64 @@ export async function getConversationsForSidebar(req, res) {
       { $sort: { lastMessageAt: -1 } },
       // 5. Lookup user details
       { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "user" } },
-      // 6. Project user profile and lastMessage metadata only
+      // 6. Lookup read state for this conversation
+      {
+        $lookup: {
+          from: "readstates",
+          let: { peerId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$userId", loggedInUserId] },
+                    { $eq: ["$peerId", "$$peerId"] },
+                  ],
+                },
+              },
+            },
+          ],
+          as: "readState",
+        },
+      },
+      // 7. Count unread messages from this peer to me after lastReadMessageId
+      {
+        $lookup: {
+          from: "messages",
+          let: {
+            peerId: "$_id",
+            lastRead: {
+              $ifNull: [
+                { $first: "$readState.lastReadMessageId" },
+                new mongoose.Types.ObjectId("000000000000000000000000"),
+              ],
+            },
+          },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$receiverId", loggedInUserId] },
+                    { $eq: ["$senderId", "$$peerId"] },
+                    { $gt: ["$_id", "$$lastRead"] },
+                  ],
+                },
+              },
+            },
+            { $count: "count" },
+          ],
+          as: "unread",
+        },
+      },
+      // 8. Project user profile, unreadCount, and lastMessage metadata only
       {
         $replaceRoot: {
           newRoot: {
             $mergeObjects: [
               { $first: "$user" },
               {
+                unreadCount: { $ifNull: [{ $first: "$unread.count" }, 0] },
                 lastMessage: {
                   _id: "$last._id",
                   senderId: "$last.senderId",
@@ -96,7 +149,7 @@ export async function getConversationsForSidebar(req, res) {
           },
         },
       },
-      // 7. Strip sensitive fields
+      // 9. Strip sensitive fields
       { $project: { clerkId: 0, email: 0 } },
     ]);
 
@@ -106,6 +159,66 @@ export async function getConversationsForSidebar(req, res) {
     res.status(500).json({ message: "Internal server error" });
   }
 }
+
+export const markRead = async (req, res) => {
+  try {
+    const { peerId } = req.params;
+    const { upTo } = req.body || {};
+    const userId = req.user._id;
+
+    if (!mongoose.isValidObjectId(peerId) || String(userId) === String(peerId)) {
+      return res.status(400).json({ message: "bad-id" });
+    }
+    if (!upTo || !mongoose.isValidObjectId(upTo)) {
+      return res.status(400).json({ message: "bad-request" });
+    }
+
+    const targetMsg = await Message.findOne({
+      _id: upTo,
+      senderId: peerId,
+      receiverId: userId,
+    });
+    if (!targetMsg) {
+      return res.status(404).json({ message: "message-not-found" });
+    }
+
+    let changed = false;
+    let state = await ReadState.findOne({ userId, peerId });
+    if (!state) {
+      try {
+        state = await ReadState.create({ userId, peerId, lastReadMessageId: targetMsg._id });
+        changed = true;
+      } catch (err) {
+        if (err.code !== 11000) throw err;
+        state = await ReadState.findOne({ userId, peerId });
+      }
+    }
+
+    if (state && String(targetMsg._id) > String(state.lastReadMessageId)) {
+      const updated = await ReadState.findOneAndUpdate(
+        { userId, peerId, lastReadMessageId: { $lt: targetMsg._id } },
+        { $set: { lastReadMessageId: targetMsg._id } },
+        { new: true }
+      );
+      if (updated) {
+        changed = true;
+        state = updated;
+      }
+    }
+
+    if (changed) {
+      emitToUser(String(userId), "readUpdated", { peerId: String(peerId) });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      lastReadMessageId: String(state?.lastReadMessageId ?? targetMsg._id),
+    });
+  } catch (err) {
+    console.error("markRead:", err.message);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
 
 export const getMessages = async (req, res) => {
   try {

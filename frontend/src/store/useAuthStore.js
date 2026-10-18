@@ -41,6 +41,7 @@ export const useAuthStore = create((set, get) => ({
   },
 
   clearAuth: () => {
+    useChatStore.getState().reset?.();
     set({ authUser: null, identity: null, isCheckingAuth: false, onlineUsers: [] });
     get().disconnectSocket();
   },

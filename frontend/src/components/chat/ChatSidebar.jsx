@@ -20,6 +20,9 @@ function mapUserForList(user, onlineUsers) {
     initials: getInitials(user.fullName),
     isOnline: onlineUsers.includes(user._id),
     snippet: user.snippet,
+    unreadCount: user.unreadCount ?? 0,
+    lastMessage: user.lastMessage,
+    lastMessageAt: user.lastMessage?.createdAt || user.lastMessageAt,
     peer: {
       name: user.fullName,
       avatarUrl: user.profilePic,

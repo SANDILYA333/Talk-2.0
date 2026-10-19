@@ -352,3 +352,132 @@ No IK migration. New code uses @noble/curves and @noble/hashes only.
   - Display user-visible safety number verification warning.
   - Never automatically accept key changes.
 
+## Amendments (S1.5) - Double Ratchet (S9)
+
+### 1. State Definition
+A Double Ratchet session record stored in IndexedDB (`session:<uid>:<peerId>`) maintains:
+- `peerId`: string.
+- `sessionId`: string (tied to initial X3DH handshake).
+- `role`: `"initiator"` | `"responder"`.
+- `rk`: Uint8Array (32 bytes) - Current Root Key.
+- `dhs`: `{ pub: string (b64), priv: string (b64) }` - Our current ratchet keypair (X25519).
+- `dhr`: string (b64) | null - Peer's current ratchet public key (X25519).
+- `cks`: string (b64) | null - Current sending chain key.
+- `ckr`: string (b64) | null - Current receiving chain key.
+- `ns`: integer - Number of messages sent in current sending chain.
+- `nr`: integer - Number of messages received in current receiving chain.
+- `pn`: integer - Length of previous sending chain (number of messages sent under previous DHs).
+- `skippedKeys`: Record `<string, { key: string (b64), createdAt: number }>` where key is `dh_pub_b64:n`.
+- `peerIk`: string (b64) - Peer's long-term identity key.
+- `peerSik`: string (b64) - Peer's signing identity key.
+- `createdAt`: integer (timestamp ms).
+- `state`: `"pending"` | `"established"`.
+
+### 2. Initialisation from X3DH
+From S8 X3DH negotiation, `SK` is derived:
+- `rk = SK` (32 bytes).
+- **Initiator (Alice):**
+  - Generates fresh ratchet keypair `DHs`.
+  - Sets `dhr = SPK_B` (Bob's signed prekey from Bob's prekey bundle).
+  - Performs initial DH ratchet step:
+    - `DH_out = DH(DHs.priv, dhr)`
+    - `(rk, cks) = KDF_RK(rk, DH_out)`
+  - `ckr = null`, `ns = 0`, `nr = 0`, `pn = 0`.
+  - Alice sends initial message with header: `{ sessionId, n: 0, pn: 0, dh: DHs.pub, ek, spkId, opkId?, ik, sik }`.
+- **Responder (Bob):**
+  - Sets `dhs = SPK_B` (keypair corresponding to the `spkId` selected in Alice's handshake).
+  - `dhr = null`, `cks = null`, `ckr = null`, `ns = 0`, `nr = 0`, `pn = 0`.
+  - When Alice's initial message arrives:
+    - Bob sets `dhr = header.dh`.
+    - Computes `DH_out = DH(dhs.priv, dhr)`.
+    - `(rk, ckr) = KDF_RK(rk, DH_out)`.
+    - Decrypts message 0.
+    - When Bob replies, Bob generates a new `DHs`, ratchets `(rk, cks) = KDF_RK(rk, DH(DHs.priv, dhr))`, and sends with `n: 0, pn: 0`.
+
+### 3. Key Derivation Functions
+- **Root Ratchet KDF (`KDF_RK`):**
+  ```
+  KDF_RK(rk, dh_out) -> (new_rk, new_ck):
+    derived = HKDF-SHA256(salt = rk, ikm = dh_out, info = "talk/v2/ratchet/root", length = 64)
+    new_rk  = derived[0..31]
+    new_ck  = derived[32..63]
+  ```
+- **Symmetric Chain KDF (`KDF_CK`):**
+  ```
+  KDF_CK(ck) -> (mk, next_ck):
+    mk      = HMAC-SHA256(key = ck, data = 0x01)  (32 bytes)
+    next_ck = HMAC-SHA256(key = ck, data = 0x02)  (32 bytes)
+  ```
+
+### 4. Wire Header & Associated Data (AAD)
+- Wire Header:
+  - `{ sessionId, n, pn, dh, ek?, spkId?, opkId?, ik?, sik? }`
+  - `dh`: base64-encoded 32-byte public ratchet key of the sender.
+  - `n`: message number in current sending chain.
+  - `pn`: length of previous sending chain.
+- Associated Data:
+  ```
+  AAD = utf8("talk/aad/v2r") || u8(v) || u8(typeCode)
+        || utf8(senderId)(24) || utf8(receiverId)(24)
+        || IK_sender(32) || IK_receiver(32)
+        || utf8(sessionId) || u32be(n) || u32be(pn) || DH_pub(32)
+  ```
+  Binds ciphertext to version (2), message type, sender, receiver, identity keys, session ID, sequence counter `n`, previous sequence counter `pn`, and ratchet key `dh`.
+
+### 5. Send & Receive Algorithms
+- **Send:**
+  - If `cks == null`: generate fresh `DHs`, compute `(rk, cks) = KDF_RK(rk, DH(DHs.priv, dhr))`.
+  - Step symmetric chain: `(mk, next_cks) = KDF_CK(cks)`.
+  - Set `cks = next_cks`.
+  - Encrypt plaintext envelope using `mk` and random 12-byte nonce with AES-256-GCM over `AAD`.
+  - Header carries `{ sessionId, n: ns, pn, dh: toB64(dhs.pub), ...initialFields }`.
+  - Increment `ns++`.
+  - Securely zero `mk` in memory.
+- **Receive:**
+  1. Check skipped keys map for key `dh:n`. If present, decrypt with stored `mk`, delete entry, and return.
+  2. If `header.dh != dhr`:
+     - Skip unreceived keys in old receiving chain up to `header.pn` (if `ckr != null`):
+       - If `header.pn - nr > MAX_SKIP`, abort (fail closed, state unchanged).
+       - For each skipped message, derive `mk` and save to `skippedKeys[dhr:i]`.
+     - DH Ratchet step:
+       - `DH_out = DH(dhs.priv, fromB64(header.dh))`
+       - `(rk, ckr) = KDF_RK(rk, DH_out)`
+       - `dhr = header.dh`
+       - `pn = ns`
+       - `nr = 0`
+       - Generate fresh `dhs` for our next send:
+         - `dhs_new = newSecret() / xPub`
+         - `DH_out2 = DH(dhs_new.priv, fromB64(dhr))`
+         - `(rk, cks) = KDF_RK(rk, DH_out2)`
+         - Securely zero old `dhs.priv`
+         - `dhs = dhs_new`
+         - `ns = 0`
+  3. Skip unreceived keys in new receiving chain up to `header.n`:
+     - If `header.n - nr > MAX_SKIP`, abort (fail closed, state unchanged).
+     - For each skipped message, derive `mk` and save to `skippedKeys[header.dh:i]`.
+  4. Derive message key `mk` for `header.n` and compute `next_ckr = KDF_CK(ckr).nextCk`.
+  5. Decrypt on a copy of the session state. Only commit to IndexedDB and update `nr = header.n + 1`, `ckr = next_ckr`, and skipped keys if AEAD authentication succeeds.
+
+### 6. Limits and Eviction
+- `MAX_SKIP = 1000`: maximum messages skipped per chain.
+- `MAX_TOTAL_SKIPPED = 2000`: maximum capacity for skipped message keys across all ratchet steps in a session. If exceeded, oldest entries (by `createdAt`) are evicted.
+- `SKIPPED_TTL_MS = 30 * 24 * 60 * 60 * 1000` (30 days): expired skipped keys are pruned on each receive.
+
+### 7. Atomicity and Web Locks
+- Decryption is performed on an in-memory clone of the session.
+- If AEAD tag fails or payload is malformed, error is thrown (`CryptoError("tampered")`), state is not committed, and in-memory counters remain unchanged.
+- All session reads, updates, sends, and receives are guarded by `navigator.locks.request("talk:<uid>:session:<peerId>")`.
+- State is committed to IndexedDB before rendering message to user and before acknowledging network receipt.
+
+### 8. Deletion Rules
+- Message keys `mk` are zeroed/deleted immediately after single use.
+- Replaced chain keys are overwritten.
+- Old DH private keys are wiped when a DH ratchet step completes.
+
+### 9. Migration from S8 Sessions
+- S8 sessions without ratchet fields (`rk`, `dhs`) are upgraded upon the first new message exchange: the sender establishes a new Double Ratchet session, while existing decrypted messages remain preserved in the local plaintext cache (`plain:<uid>:<msgId>`).
+
+### 10. Non-Goals
+- Header encryption, multi-device sync, and plaintext cache protection (deferred to Phase 6).
+
+

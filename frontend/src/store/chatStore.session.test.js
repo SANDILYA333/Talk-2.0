@@ -344,5 +344,76 @@ describe("S8 Integration & Store Sessions", () => {
     expect(bMsgs[0].att).toBeDefined();
     expect(bMsgs[0].att.kind).toBe("image");
   });
+
+  it("peer key changed: sending is blocked, message fails with key-changed, and UI failure reason matches", async () => {
+    const userA = await mkUser();
+    const userB = await mkUser();
+
+    const getBundleOf = async (id, withOpk = false) => {
+      const idn = await loadIdentity(id);
+      const spk = await ensureSpk(id);
+      return {
+        userId: id,
+        ikPub: toB64(idn.ik.pub),
+        sikPub: toB64(idn.sik.pub),
+        ikBinding: toB64(signIkBinding(idn.sik.priv, idn.ik.pub)),
+        spk: { id: spk.id, pub: toB64(spk.pub), sig: toB64(spk.sig) },
+        opk: withOpk && userOpkMap[id] ? { id: userOpkMap[id].id, pub: toB64(userOpkMap[id].pub) } : null,
+        protoMax: 2,
+      };
+    };
+
+    const getKeysOf = async (id) => {
+      const b = await getBundleOf(id);
+      return { publicKey: b.ikPub, sik: b.sikPub, connectCode: "TALK-12345" };
+    };
+
+    ax.get.mockImplementation(async (url, cfg) => {
+      const mb = url.match(/^\/keys\/bundle\/(.+)$/);
+      if (mb) return { data: await getBundleOf(mb[1], !!cfg?.params?.opk) };
+      const mk = url.match(/^\/identity\/key\/(.+)$/);
+      if (mk) return { data: await getKeysOf(mk[1]) };
+      if (url === "/messages/conversations") return { data: [] };
+      throw new Error("unexpected: " + url);
+    });
+
+    ax.post.mockImplementation(async (url, body) => ({
+      data: {
+        _id: uid(),
+        senderId: userA,
+        receiverId: userB,
+        createdAt: new Date().toISOString(),
+        ...body,
+      },
+    }));
+
+    currentAuthUserId = userA;
+    useChatStore.setState({
+      messages: [],
+      conversations: [],
+      selectedUser: { _id: userB, fullName: "Bob" },
+      activeConversationId: userB,
+    });
+
+    // Send first message: successfully creates session and pins B
+    await useChatStore.getState().sendMessage("First message");
+    expect(useChatStore.getState().messages[0].state).toBe("ok");
+
+    // Simulate peer B key changing by modifying pinned identity
+    const { set: idbSet } = await import("idb-keyval");
+    await idbSet(`contact:${userA}:${userB}`, {
+      ik: b64(nacl.randomBytes(32)),
+      sik: b64(nacl.randomBytes(32)),
+      verified: false,
+    });
+
+    // Send second message: should be blocked with key-changed
+    await useChatStore.getState().sendMessage("Blocked message");
+    const msgs = useChatStore.getState().messages;
+    expect(msgs.length).toBe(2);
+    expect(msgs[1].state).toBe("failed");
+    expect(msgs[1].failReason).toBe("key-changed");
+  });
 });
+
 

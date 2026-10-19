@@ -198,6 +198,17 @@ describe("POST /keys/opks and count", () => {
       expect((await call(postOpks, { user, body: bad })).status).toBe(400);
     }
   });
+  it("OPK replenishment below 20: count returns < 20, replenishing adds 50", async () => {
+    const { user } = await ready();
+    await call(postOpks, { user, body: { keys: opkBatch(1, 19) } });
+    const c1 = await call(getOpkCount, { user });
+    expect(c1.json.count).toBe(19);
+    const replenish = await call(postOpks, { user, body: { keys: opkBatch(20, 50) } });
+    expect(replenish.status).toBe(200);
+    expect(replenish.json.count).toBe(69);
+    const c2 = await call(getOpkCount, { user });
+    expect(c2.json.count).toBe(69);
+  });
 });
 
 describe("GET /keys/bundle/:userId", () => {

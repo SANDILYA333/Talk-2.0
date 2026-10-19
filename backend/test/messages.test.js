@@ -32,6 +32,21 @@ const good = (over = {}) => ({
   ...over,
 });
 
+const goodV2 = (over = {}) => ({
+  cid: randomUUID(), v: 2, type: "text",
+  ciphertext: b64(randomBytes(16 + 256)), nonce: b64(randomBytes(12)),
+  header: {
+    sessionId: "sess_" + randomBytes(16).toString("hex"),
+    n: 0,
+    ek: b64(randomBytes(32)),
+    spkId: 1,
+    opkId: 5,
+    ik: b64(randomBytes(32)),
+    sik: b64(randomBytes(32)),
+  },
+  ...over,
+});
+
 async function call(handler, { user, body, params, query } = {}) {
   const req = { user, body, params: params ?? {}, query: query ?? {} };
   let status = 200, json;
@@ -89,7 +104,7 @@ describe("sendMessage: validation", () => {
     "missing cid": { cid: undefined },
     "cid with spaces": { cid: "has space 1234" },
     "cid too short": { cid: "abc" },
-    "v=2": { v: 2 }, "v=0": { v: 0 }, "v is a string": { v: "1" },
+    "v=2": { v: 2 }, "v=3": { v: 3 }, "v=0": { v: 0 }, "v is a string": { v: "1" },
     "type media": { type: "media" }, "type secret": { type: "secret" }, "type bogus": { type: "x" },
     "ciphertext not base64": { ciphertext: "***" },
     "ciphertext non-canonical": { ciphertext: b64(randomBytes(272)) + "\n" },
@@ -212,3 +227,114 @@ describe("getConversationsForSidebar", () => {
     expect(JSON.stringify(r.json)).not.toMatch(/"(text|ciphertext|nonce|header)":/);
   });
 });
+
+describe("sendMessage: v2 sessions", () => {
+  it("accepts a valid v2 initial payload and stores no plaintext", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const body = goodV2();
+    const r = await send(a, b, body);
+    expect(r.status).toBe(201);
+    expect(r.json).toMatchObject({
+      senderId: String(a._id),
+      receiverId: String(b._id),
+      cid: body.cid,
+      v: 2,
+      type: "text",
+      header: {
+        sessionId: body.header.sessionId,
+        n: 0,
+        ek: body.header.ek,
+        spkId: 1,
+        opkId: 5,
+        ik: body.header.ik,
+        sik: body.header.sik,
+      },
+    });
+    expect(JSON.stringify(r.json)).not.toMatch(/"(text|image|video)":/);
+    const raw = await Message.collection.findOne({ cid: body.cid });
+    expect(raw.ciphertext).toBe(body.ciphertext);
+    expect(raw.header.sessionId).toBe(body.header.sessionId);
+    expect(raw.header.n).toBe(0);
+    expect(raw.text).toBeUndefined();
+    expect(raw.image).toBeUndefined();
+    expect(raw.video).toBeUndefined();
+    expect(emitToUser).toHaveBeenCalledTimes(1);
+    expect(emitToUser.mock.calls[0][1]).toBe("newMessage");
+  });
+
+  it("accepts a valid v2 subsequent message (minimal header with sessionId and n)", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const body = goodV2({
+      header: { sessionId: "sess_" + randomBytes(16).toString("hex"), n: 5 },
+    });
+    const r = await send(a, b, body);
+    expect(r.status).toBe(201);
+    expect(r.json.v).toBe(2);
+    expect(r.json.header).toEqual({ sessionId: body.header.sessionId, n: 5 });
+  });
+
+  it("rejects missing or malformed sessionId", async () => {
+    const a = await mkUser(), b = await mkUser();
+    for (const badSession of [
+      undefined,
+      "",
+      "short",
+      "x".repeat(65),
+      12345678,
+      null,
+      {},
+    ]) {
+      const r = await send(a, b, goodV2({ header: { sessionId: badSession, n: 0 } }));
+      expect(r.status).toBe(400);
+    }
+  });
+
+  it("rejects missing or malformed n", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const sid = "sess_12345678";
+    for (const badN of [
+      undefined,
+      -1,
+      1.5,
+      "0",
+      null,
+      {},
+      NaN,
+    ]) {
+      const r = await send(a, b, goodV2({ header: { sessionId: sid, n: badN } }));
+      expect(r.status).toBe(400);
+    }
+  });
+
+  it("rejects malformed optional fields (spkId, ik, ek, extra keys)", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const sid = "sess_12345678";
+    const badHeaders = [
+      { sessionId: sid, n: 0, spkId: -1 },
+      { sessionId: sid, n: 0, spkId: 1.5 },
+      { sessionId: sid, n: 0, spkId: "1" },
+      { sessionId: sid, n: 0, ik: b64(randomBytes(31)) },
+      { sessionId: sid, n: 0, ik: "not_base64_!!" },
+      { sessionId: sid, n: 0, ek: b64(randomBytes(33)) },
+      { sessionId: sid, n: 0, sik: b64(randomBytes(31)) },
+      { sessionId: sid, n: 0, opkId: -1 },
+      { sessionId: sid, n: 0, opkId: 2.2 },
+      { sessionId: sid, n: 0, unknownField: true },
+    ];
+    for (const h of badHeaders) {
+      const r = await send(a, b, goodV2({ header: h }));
+      expect(r.status).toBe(400);
+    }
+  });
+
+  it("rejects plaintext fields in v2 body", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const r1 = await send(a, b, goodV2({ text: "leaked plaintext" }));
+    expect(r1.status).toBe(400);
+    const r2 = await send(a, b, goodV2({ image: "leaked image" }));
+    expect(r2.status).toBe(400);
+    const r3 = await send(a, b, goodV2({ video: "leaked video" }));
+    expect(r3.status).toBe(400);
+  });
+});
+

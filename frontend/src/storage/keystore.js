@@ -30,6 +30,8 @@ const K = {
   opk: (u, id) => `opk:${u}:${id}`,
   opkNext: (u) => `opk-next:${u}`,
   plain: (u, id) => `plain:${u}:${id}`,
+  session: (u, peer) => `session:${u}:${peer}`,
+  loserSession: (u, peer) => `session-loser:${u}:${peer}`,
 };
 
 async function keysWithPrefix(prefix) {
@@ -136,10 +138,36 @@ export const putPlain = (uid, msgId, rec) => set(K.plain(uid, msgId), rec);
 export const getPlain = async (uid, msgId) => (await get(K.plain(uid, msgId))) ?? null;
 export const delPlain = (uid, msgId) => del(K.plain(uid, msgId));
 
+// ---------- sessions (v2) ----------
+export function withSessionLock(uid, peerId, fn) {
+  const lockName = `talk:${uid}:session:${peerId}`;
+  return withLock(lockName, fn);
+}
+
+export function saveSession(uid, peerId, session) {
+  return set(K.session(uid, peerId), session);
+}
+
+export async function loadSession(uid, peerId) {
+  return (await get(K.session(uid, peerId))) ?? null;
+}
+
+export function deleteSession(uid, peerId) {
+  return del(K.session(uid, peerId));
+}
+
+export function saveLoserSession(uid, peerId, session) {
+  return set(K.loserSession(uid, peerId), session);
+}
+
+export async function loadLoserSession(uid, peerId) {
+  return (await get(K.loserSession(uid, peerId))) ?? null;
+}
+
 // ---------- identity reset ----------
 export function wipeKeyMaterial(uid) {
   return withLock(lockFor(uid), async () => {
-    const prefixes = [`spk:${uid}:`, `opk:${uid}:`, `session:${uid}:`];
+    const prefixes = [`spk:${uid}:`, `opk:${uid}:`, `session:${uid}:`, `session-loser:${uid}:`];
     for (const p of prefixes) for (const k of await keysWithPrefix(p)) await del(k);
     for (const k of [K.spkCur(uid), K.spkNext(uid), K.opkNext(uid)]) await del(k);
   });

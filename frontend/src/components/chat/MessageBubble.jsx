@@ -266,6 +266,20 @@ export function MessageBubble({ message }) {
           </p>
         );
 
+      case "session-failed":
+        return (
+          <p className="font-medium text-red-500 dark:text-red-400 text-xs">
+            Secure session setup failed
+          </p>
+        );
+
+      case "decrypt-failed":
+        return (
+          <p className="font-medium text-red-500 dark:text-red-400 text-xs">
+            Failed to decrypt message
+          </p>
+        );
+
       case "ok":
       default:
         return (

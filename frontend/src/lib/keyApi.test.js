@@ -29,8 +29,8 @@ describe("uploadBundle", () => {
     await uploadBundle(u);
     const [path, sent] = ax.put.mock.calls[0];
     expect(path).toBe("/keys/bundle");
-    expect(sent.protoMax).toBe(1);
-    const parsed = parseBundle({ userId: u, ikPub: b64(kp.publicKey), sikPub: sent.sik, ikBinding: sent.ikBinding, spk: sent.spk, opk: null, protoMax: 1 });
+    expect(sent.protoMax).toBe(2);
+    const parsed = parseBundle({ userId: u, ikPub: b64(kp.publicKey), sikPub: sent.sik, ikBinding: sent.ikBinding, spk: sent.spk, opk: null, protoMax: 2 });
     expect(verifyBundle(parsed)).toEqual({ ok: true });
   });
   it("throws without a signing key", async () => {
@@ -39,16 +39,16 @@ describe("uploadBundle", () => {
 });
 
 describe("syncOpks", () => {
-  it("does nothing at 10 or more", async () => {
+  it("does nothing at 20 or more", async () => {
     const u = uid(); await legacy(u);
-    ax.get.mockResolvedValue({ data: { count: 10 } });
+    ax.get.mockResolvedValue({ data: { count: 20 } });
     await syncOpks(u);
     expect(ax.post).not.toHaveBeenCalled();
     expect(await countOpks(u)).toBe(0);
   });
-  it("uploads 50 public keys at 9", async () => {
+  it("uploads 50 public keys at 19", async () => {
     const u = uid(); await legacy(u);
-    ax.get.mockResolvedValue({ data: { count: 9 } });
+    ax.get.mockResolvedValue({ data: { count: 19 } });
     ax.post.mockResolvedValue({ data: {} });
     await syncOpks(u);
     const [path, sent] = ax.post.mock.calls[0];

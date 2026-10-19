@@ -1,8 +1,29 @@
 import { axiosInstance } from "./axios";
 import { fetchBundle } from "./keyApi";
 import { checkContact, readPin } from "./safety";
-import { loadIdentity, getSpkPriv, getPlain, putPlain } from "../storage/keystore";
-import { encryptV1, decryptV1, fromB64, toB64, CryptoError } from "../crypto/index.js";
+import {
+  loadIdentity,
+  getSpkPriv,
+  takeOpkPriv,
+  getPlain,
+  putPlain,
+  withSessionLock,
+  loadSession,
+  saveSession,
+  loadLoserSession,
+  saveLoserSession,
+} from "../storage/keystore";
+import {
+  encryptV1,
+  decryptV1,
+  initiateSession,
+  encryptSessionMessage,
+  decryptSessionMessage,
+  resolveSimultaneousInitiation,
+  fromB64,
+  toB64,
+  CryptoError,
+} from "../crypto/index.js";
 import { decryptBlob } from "./mediaCrypto.js";
 import { blobStore } from "./blobStore.js";
 import { validateAttachment } from "./mediaSecurity.js";
@@ -19,12 +40,13 @@ export class SendError extends Error {
   constructor(code) { super(code); this.code = code; }
 }
 
-async function cachedBundle(peerId) {
+async function cachedBundle(peerId, { opk = false } = {}) {
   const hit = bundleCache.get(peerId);
-  if (hit && Date.now() - hit.at < BUNDLE_TTL_MS) return hit.bundle;
+  // When an OPK is needed, we do not use the cache because an OPK must be fetched freshly with ?opk=1
+  if (!opk && hit && Date.now() - hit.at < BUNDLE_TTL_MS) return hit.bundle;
   try {
-    const bundle = await fetchBundle(peerId);
-    bundleCache.set(peerId, { at: Date.now(), bundle });
+    const bundle = await fetchBundle(peerId, { opk });
+    if (!opk) bundleCache.set(peerId, { at: Date.now(), bundle });
     return bundle;
   } catch (e) {
     const status = e.response?.status;
@@ -39,23 +61,67 @@ export async function encryptEnvelope({ me, peerId, type = "text", envelope }) {
   const idn = await loadIdentity(me);
   if (!idn) throw new SendError("no-identity");
 
-  const bundle = await cachedBundle(peerId);
-  const cur = { ik: toB64(bundle.ikPub), sik: toB64(bundle.sikPub) };
-  const trust = await checkContact(me, peerId, cur);
-  if (trust.status === "changed") {
-    clearBundleCache(peerId);
-    throw new SendError("key-changed");
-  }
-  const pinned = { ik: bundle.ikPub, sik: bundle.sikPub };
+  return withSessionLock(me, peerId, async () => {
+    let session = await loadSession(me, peerId);
+    let initialHeader = null;
 
-  try {
-    const payload = await encryptV1({ envelope, type, senderId: me, receiverId: peerId, myIk: idn.ik, bundle, pinned });
-    return { payload, envelope };
-  } catch (e) {
-    if (e instanceof CryptoError) throw new SendError(e.code);
-    throw e;
-  }
+    if (!session) {
+      // Fetch bundle requesting an OPK (?opk=1)
+      const bundle = await cachedBundle(peerId, { opk: true });
+      const cur = { ik: toB64(bundle.ikPub), sik: toB64(bundle.sikPub) };
+      const trust = await checkContact(me, peerId, cur);
+      if (trust.status === "changed") {
+        clearBundleCache(peerId);
+        throw new SendError("key-changed");
+      }
+      const pinned = { ik: bundle.ikPub, sik: bundle.sikPub };
+
+      try {
+        const init = await initiateSession({
+          senderId: me,
+          receiverId: peerId,
+          myIk: idn.ik,
+          mySik: idn.sik,
+          bundle,
+          pinned,
+        });
+        session = init.session;
+        initialHeader = init.initialHeader;
+      } catch (e) {
+        if (e instanceof CryptoError) throw new SendError(e.code);
+        throw e;
+      }
+    } else {
+      // Verify pinned identity has not changed
+      const pin = await readPin(me, peerId);
+      if (pin && session.peerIk && pin.ik !== session.peerIk) {
+        throw new SendError("key-changed");
+      }
+      if (pin && session.peerSik && pin.sik && pin.sik !== session.peerSik) {
+        throw new SendError("key-changed");
+      }
+    }
+
+    try {
+      const payload = await encryptSessionMessage({
+        session,
+        envelope,
+        type,
+        senderId: me,
+        receiverId: peerId,
+        myIk: idn.ik,
+        initialHeader,
+      });
+
+      await saveSession(me, peerId, session);
+      return { payload, envelope };
+    } catch (e) {
+      if (e instanceof CryptoError) throw new SendError(e.code);
+      throw e;
+    }
+  });
 }
+
 
 export async function encryptText({ me, peerId, text }) {
   const envelope = { t: "text", body: text, ts: Date.now() };
@@ -114,7 +180,7 @@ export async function readMessage({ me, msg }) {
   }
 
   if (msg.senderId === me) return { state: "undecryptable" };
-  if (msg.v !== 1) return { state: "unsupported-version" };
+  if (msg.v !== 1 && msg.v !== 2) return { state: "unsupported-version" };
 
   const idn = await loadIdentity(me);
   if (!idn) return { state: "undecryptable" };
@@ -125,35 +191,112 @@ export async function readMessage({ me, msg }) {
     if (!pin) return { state: "waiting-for-key" };
   }
 
-  try {
-    const env = await decryptV1({
-      msg, senderId: msg.senderId, receiverId: me, myIk: idn.ik,
-      getSpkPriv: (id) => getSpkPriv(me, id),
-      senderIkPub: fromB64(pin.ik),
-    });
+  if (msg.v === 1) {
+    try {
+      const env = await decryptV1({
+        msg, senderId: msg.senderId, receiverId: me, myIk: idn.ik,
+        getSpkPriv: (id) => getSpkPriv(me, id),
+        senderIkPub: fromB64(pin.ik),
+      });
 
-    if (env.t === "media") {
-      if (!validateAttachment(env.att, blobStore.getEndpoint())) {
-        return { state: "tampered" };
+      if (env.t === "media") {
+        if (!validateAttachment(env.att, blobStore.getEndpoint())) {
+          return { state: "tampered" };
+        }
+      }
+
+      await putPlain(me, msg._id, { t: env.t, body: env.body, ts: env.ts, att: env.att });
+      return {
+        state: "ok",
+        text: env.body ?? "",
+        ts: env.ts,
+        type: env.t,
+        att: toSafeAtt(env.att),
+      };
+    } catch (e) {
+      const code = e instanceof CryptoError ? e.code : "tampered";
+      if (code === "tampered") {
+        const cur = await currentKeys(msg.senderId).catch(() => null);
+        if (cur && (cur.ik !== pin.ik || (pin.sik && cur.sik && cur.sik !== pin.sik))) return { state: "key-changed" };
+      }
+      return { state: code };
+    }
+  }
+
+  // msg.v === 2
+  return withSessionLock(me, msg.senderId, async () => {
+    let session = await loadSession(me, msg.senderId);
+    let isLoserSession = false;
+
+    // Check simultaneous initiation tie-breaking if session is pending and an incoming initial message arrives
+    if (session && session.state === "pending" && msg.header?.ek && msg.header?.sessionId !== session.sessionId) {
+      const peerIkPub = fromB64(session.peerIk || pin.ik);
+      const tie = resolveSimultaneousInitiation({
+        localSession: session,
+        incomingHeader: msg.header,
+        myIk: idn.ik.pub,
+        peerIk: peerIkPub,
+      });
+
+      if (!tie.winnerIsMe) {
+        // Peer's session won: save local initiator session as loser session, allow new session creation
+        await saveLoserSession(me, msg.senderId, session);
+        session = null;
       }
     }
 
-    await putPlain(me, msg._id, { t: env.t, body: env.body, ts: env.ts, att: env.att });
-    return {
-      state: "ok",
-      text: env.body ?? "",
-      ts: env.ts,
-      type: env.t,
-      att: toSafeAtt(env.att),
-    };
-  } catch (e) {
-    const code = e instanceof CryptoError ? e.code : "tampered";
-    if (code === "tampered") {
-      const cur = await currentKeys(msg.senderId).catch(() => null);
-      if (cur && (cur.ik !== pin.ik || (pin.sik && cur.sik && cur.sik !== pin.sik))) return { state: "key-changed" };
+    // If incoming message belongs to a loser session, try decrypting with loser session
+    if (!session || (msg.header?.sessionId && session.sessionId !== msg.header.sessionId)) {
+      const loser = await loadLoserSession(me, msg.senderId);
+      if (loser && loser.sessionId === msg.header?.sessionId) {
+        session = loser;
+        isLoserSession = true;
+      }
     }
-    return { state: code };
-  }
+
+    try {
+      const dec = await decryptSessionMessage({
+        session,
+        receiverId: me,
+        senderId: msg.senderId,
+        myIk: idn.ik,
+        msg,
+        getSpkPriv: (id) => getSpkPriv(me, id),
+        takeOpkPriv: (id) => takeOpkPriv(me, id),
+        pinned: { ik: fromB64(pin.ik), sik: pin.sik ? fromB64(pin.sik) : null },
+      });
+
+      const env = dec.envelope;
+      if (env.t === "media") {
+        if (!validateAttachment(env.att, blobStore.getEndpoint())) {
+          return { state: "tampered" };
+        }
+      }
+
+      // Commit session state
+      if (isLoserSession) {
+        await saveLoserSession(me, msg.senderId, dec.session);
+      } else {
+        await saveSession(me, msg.senderId, dec.session);
+      }
+
+      await putPlain(me, msg._id, { t: env.t, body: env.body, ts: env.ts, att: env.att });
+      return {
+        state: "ok",
+        text: env.body ?? "",
+        ts: env.ts,
+        type: env.t,
+        att: toSafeAtt(env.att),
+      };
+    } catch (e) {
+      const code = e instanceof CryptoError ? e.code : "tampered";
+      if (code === "tampered") {
+        const cur = await currentKeys(msg.senderId).catch(() => null);
+        if (cur && (cur.ik !== pin.ik || (pin.sik && cur.sik && cur.sik !== pin.sik))) return { state: "key-changed" };
+      }
+      return { state: code };
+    }
+  });
 }
 
 export async function loadMedia(me, messageId) {

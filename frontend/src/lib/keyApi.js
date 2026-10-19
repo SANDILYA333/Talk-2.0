@@ -2,10 +2,10 @@ import { axiosInstance } from "./axios";
 import { loadIdentity, ensureSpk, generateOpks, OPK_BATCH } from "../storage/keystore";
 import { toB64, fromB64, signIkBinding } from "../crypto/index.js";
 
-const OPK_LOW = 10;
+const OPK_LOW = 20;
 
 // idempotent: safe to run on every boot, and it self-heals if the server lost the bundle
-export async function uploadBundle(uid) {
+export async function uploadBundle(uid, protoMax = 2) {
   const idn = await loadIdentity(uid);
   if (!idn?.sik) throw new Error("no-signing-key");
   const spk = await ensureSpk(uid);
@@ -13,7 +13,7 @@ export async function uploadBundle(uid) {
     sik: toB64(idn.sik.pub),
     ikBinding: toB64(signIkBinding(idn.sik.priv, idn.ik.pub)),
     spk: { id: spk.id, pub: toB64(spk.pub), sig: toB64(spk.sig) },
-    protoMax: 1,
+    protoMax,
   });
 }
 

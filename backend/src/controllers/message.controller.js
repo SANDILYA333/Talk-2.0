@@ -31,7 +31,7 @@ function parseSendBody(b) {
     if (!ALLOWED.has(k)) return { message: "unknown-field" };
   }
   if (typeof b.cid !== "string" || !CID_RE.test(b.cid)) return { message: "bad-cid" };
-  if (b.v !== 1) return { message: "unsupported-version" };
+  if (b.v !== 1 && b.v !== 2) return { message: "unsupported-version" };
 
   if (b.type === "text") {
     if (b.blobId !== undefined) return { message: "blob-forbidden-on-text" };
@@ -47,18 +47,67 @@ function parseSendBody(b) {
 
   const h = b.header;
   if (!h || typeof h !== "object" || Array.isArray(h)) return { message: "bad-header" };
-  const keys = Object.keys(h);
-  if (keys.length !== 2 || !keys.includes("ek") || !keys.includes("spkId")) return { message: "bad-header" };
-  if (!b64Bytes(h.ek, 32) || !isU32(h.spkId)) return { message: "bad-header" };
+
+  if (b.v === 1) {
+    const keys = Object.keys(h);
+    if (keys.length !== 2 || !keys.includes("ek") || !keys.includes("spkId")) return { message: "bad-header" };
+    if (!b64Bytes(h.ek, 32) || !isU32(h.spkId)) return { message: "bad-header" };
+
+    return {
+      doc: {
+        cid: b.cid,
+        v: 1,
+        type: b.type,
+        ciphertext: b.ciphertext,
+        nonce: b.nonce,
+        header: { ek: h.ek, spkId: h.spkId },
+        ...(b.blobId ? { blobId: b.blobId } : {}),
+      },
+    };
+  }
+
+  // v === 2
+  if (typeof h.sessionId !== "string" || h.sessionId.length < 8 || h.sessionId.length > 64) return { message: "bad-header" };
+  if (typeof h.n !== "number" || !Number.isInteger(h.n) || h.n < 0) return { message: "bad-header" };
+
+  // Optional initial message fields
+  const v2Header = { sessionId: h.sessionId, n: h.n };
+  const allowedV2HeaderKeys = new Set(["sessionId", "n", "ek", "spkId", "opkId", "ik", "sik"]);
+  for (const hk of Object.keys(h)) {
+    if (!allowedV2HeaderKeys.has(hk)) return { message: "bad-header" };
+  }
+
+  if (h.ek !== undefined) {
+    if (!b64Bytes(h.ek, 32)) return { message: "bad-header" };
+    v2Header.ek = h.ek;
+  }
+  if (h.spkId !== undefined) {
+    if (!isU32(h.spkId)) return { message: "bad-header" };
+    v2Header.spkId = h.spkId;
+  }
+  if (h.opkId !== undefined && h.opkId !== null) {
+    if (!isU32(h.opkId)) return { message: "bad-header" };
+    v2Header.opkId = h.opkId;
+  } else if (h.opkId === null) {
+    v2Header.opkId = null;
+  }
+  if (h.ik !== undefined) {
+    if (!b64Bytes(h.ik, 32)) return { message: "bad-header" };
+    v2Header.ik = h.ik;
+  }
+  if (h.sik !== undefined) {
+    if (!b64Bytes(h.sik, 32)) return { message: "bad-header" };
+    v2Header.sik = h.sik;
+  }
 
   return {
     doc: {
       cid: b.cid,
-      v: 1,
+      v: 2,
       type: b.type,
       ciphertext: b.ciphertext,
       nonce: b.nonce,
-      header: { ek: h.ek, spkId: h.spkId },
+      header: v2Header,
       ...(b.blobId ? { blobId: b.blobId } : {}),
     },
   };

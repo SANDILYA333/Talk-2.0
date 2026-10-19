@@ -7,8 +7,8 @@ vi.mock("./axios", () => ({ axiosInstance: { get: vi.fn(), put: vi.fn(), post: v
 import { axiosInstance as ax } from "./axios";
 import { encryptText, readMessage, snippetFor, clearBundleCache } from "./chatCrypto.js";
 import { readPin, acceptKeyChange } from "./safety.js";
-import { upgradeIdentity, ensureSpk, loadIdentity, putPlain, getPlain, delPlain, wipeKeyMaterial } from "../storage/keystore.js";
-import { signIkBinding, toB64, fromB64 } from "../crypto/index.js";
+import { upgradeIdentity, ensureSpk, loadIdentity, putPlain, getPlain, delPlain, wipeKeyMaterial, deleteSession } from "../storage/keystore.js";
+import { signIkBinding, toB64, fromB64, encryptV1 } from "../crypto/index.js";
 
 let n = 0;
 const uid = () => (++n).toString(16).padStart(24, "0");
@@ -77,10 +77,10 @@ async function flow(text = "hi bob") {
 const flip = (b) => { const u = fromB64(b); u[0] ^= 1; return toB64(u); };
 
 describe("encryptText", () => {
-  it("makes a v1 payload with no plaintext in it", async () => {
+  it("makes a v2 payload with no plaintext in it", async () => {
     const A = await mkUser(), B = await mkUser();
     const { payload, envelope } = await encryptText({ me: A, peerId: B, text: "secret-hello" });
-    expect(payload.v).toBe(1);
+    expect(payload.v).toBe(2);
     expect(payload.type).toBe("text");
     expect(Object.keys(payload).sort()).toEqual(["ciphertext", "header", "nonce", "type", "v"]);
     expect(JSON.stringify(payload)).not.toContain("secret-hello");
@@ -91,12 +91,13 @@ describe("encryptText", () => {
     await encryptText({ me: A, peerId: B, text: "x" });
     expect(await readPin(A, B)).toMatchObject({ verified: false });
   });
-  it("caches the bundle, refetches after clearBundleCache", async () => {
+  it("caches the bundle, refetches after clearBundleCache and session reset", async () => {
     const A = await mkUser(), B = await mkUser();
     await encryptText({ me: A, peerId: B, text: "1" });
     await encryptText({ me: A, peerId: B, text: "2" });
     expect(calls("/keys/bundle")).toBe(1);
     clearBundleCache();
+    await deleteSession(A, B);
     await encryptText({ me: A, peerId: B, text: "3" });
     expect(calls("/keys/bundle")).toBe(2);
   });
@@ -110,6 +111,7 @@ describe("encryptText", () => {
     await encryptText({ me: A, peerId: B, text: "x" });
     await resetUser(B);
     clearBundleCache();
+    await deleteSession(A, B);
     await expect(encryptText({ me: A, peerId: B, text: "y" })).rejects.toMatchObject({ code: "key-changed" });
   });
   it("refuses a bundle with a bad signature", async () => {
@@ -135,8 +137,26 @@ describe("readMessage", () => {
     await wipeKeyMaterial(B);
     expect((await readMessage({ me: B, msg })).state).toBe("ok"); // cache hit
   });
-  it("re-decrypts when the cache entry is deleted", async () => {
-    const { B, msg } = await flow("again");
+  it("re-decrypts when the cache entry is deleted (v1 message)", async () => {
+    const A = await mkUser(), B = await mkUser();
+    const idnA = await loadIdentity(A);
+    const rawB = await bundleOf(B);
+    const bundleB = {
+      userId: B,
+      ikPub: fromB64(rawB.ikPub),
+      sikPub: fromB64(rawB.sikPub),
+      ikBinding: fromB64(rawB.ikBinding),
+      spk: { id: rawB.spk.id, pub: fromB64(rawB.spk.pub), sig: fromB64(rawB.spk.sig) },
+    };
+    const v1Payload = await encryptV1({
+      bundle: bundleB,
+      senderId: A,
+      receiverId: B,
+      myIk: idnA.ik,
+      type: "text",
+      envelope: { t: "text", body: "again", ts: Date.now() },
+    });
+    const msg = wire(A, B, v1Payload);
     await readMessage({ me: B, msg });
     await delPlain(B, msg._id);
     expect(await readMessage({ me: B, msg })).toMatchObject({ state: "ok", text: "again" });
@@ -177,7 +197,7 @@ describe("readMessage", () => {
   it("unsupported version never touches the network", async () => {
     const { B, msg } = await flow();
     ax.get.mockClear();
-    expect((await readMessage({ me: B, msg: { ...msg, v: 2 } })).state).toBe("unsupported-version");
+    expect((await readMessage({ me: B, msg: { ...msg, v: 3 } })).state).toBe("unsupported-version");
     expect(ax.get).not.toHaveBeenCalled();
   });
   it("undecryptable when the SPK is gone and nothing is cached", async () => {

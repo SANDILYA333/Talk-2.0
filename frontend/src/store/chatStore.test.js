@@ -128,7 +128,7 @@ describe("useChatStore E2EE", () => {
     expect(capturedBody).toBeDefined();
     expect(JSON.stringify(capturedBody)).not.toContain("super secret message");
     expect(Object.keys(capturedBody).sort()).toEqual(["cid", "ciphertext", "header", "nonce", "type", "v"]);
-    expect(capturedBody.v).toBe(1);
+    expect(capturedBody.v).toBe(2);
     expect(capturedBody.type).toBe("text");
 
     const state = useChatStore.getState();

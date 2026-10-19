@@ -12,22 +12,24 @@ import { MessageSquareIcon, UsersIcon } from "lucide-react";
 import { ConversationRow } from "./ConversationRow";
 
 function mapUserForList(user, onlineUsers) {
+  const fullName = user?.fullName || "User";
+  const isOnline = Array.isArray(onlineUsers) && onlineUsers.includes(user?._id);
   return {
-    conversationId: user._id,
-    id: user._id,
-    name: user.fullName,
-    avatarUrl: user.profilePic,
-    initials: getInitials(user.fullName),
-    isOnline: onlineUsers.includes(user._id),
-    snippet: user.snippet,
-    unreadCount: user.unreadCount ?? 0,
-    lastMessage: user.lastMessage,
-    lastMessageAt: user.lastMessage?.createdAt || user.lastMessageAt,
+    conversationId: user?._id,
+    id: user?._id,
+    name: fullName,
+    avatarUrl: user?.profilePic || "",
+    initials: getInitials(fullName),
+    isOnline,
+    snippet: user?.snippet || "",
+    unreadCount: user?.unreadCount ?? 0,
+    lastMessage: user?.lastMessage,
+    lastMessageAt: user?.lastMessage?.createdAt || user?.lastMessageAt,
     peer: {
-      name: user.fullName,
-      avatarUrl: user.profilePic,
-      initials: getInitials(user.fullName),
-      isOnline: onlineUsers.includes(user._id),
+      name: fullName,
+      avatarUrl: user?.profilePic || "",
+      initials: getInitials(fullName),
+      isOnline,
     },
   };
 }

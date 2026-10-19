@@ -7,8 +7,24 @@ function getSystemTheme() {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+function safeGetStorage(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSetStorage(key, val) {
+  try {
+    localStorage.setItem(key, val);
+  } catch {
+    // Ignore storage errors in restricted browser environments
+  }
+}
+
 function readStoredTheme() {
-  const theme = localStorage.getItem("theme");
+  const theme = safeGetStorage("theme");
   if (theme === "light" || theme === "dark") return theme;
 
   return null;
@@ -21,7 +37,7 @@ function applyDomTheme(theme) {
 }
 
 function readStoredThemePreset() {
-  const themePreset = localStorage.getItem("theme-preset");
+  const themePreset = safeGetStorage("theme-preset");
   if (themePreset && isValidThemePreset(themePreset)) return themePreset;
 
   return DEFAULT_THEME_PRESET_ID;
@@ -43,8 +59,8 @@ export function ThemeProvider({ children }) {
 
   // this stores the theme and theme preset in local storage
   useEffect(() => {
-    localStorage.setItem("theme", theme);
-    localStorage.setItem("theme-preset", themePreset);
+    safeSetStorage("theme", theme);
+    safeSetStorage("theme-preset", themePreset);
   }, [theme, themePreset]);
 
   const setTheme = (next) => setThemeState(next);

@@ -47,6 +47,17 @@ let n = 0;
 const uid = () => (++n).toString(16).padStart(24, "0");
 const b64 = (u) => Buffer.from(u).toString("base64");
 
+async function waitFor(fn, timeout = 2000, interval = 15) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      if (fn()) return;
+    } catch {}
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  fn();
+}
+
 async function mkUser() {
   const id = uid();
   const kp = nacl.box.keyPair();
@@ -175,7 +186,7 @@ describe("useChatStore unread counts & chat list (S6)", () => {
     };
 
     mockSocket.emit("newMessage", wireMsg);
-    await new Promise((r) => setTimeout(r, 60));
+    await waitFor(() => useChatStore.getState().conversations.length > 0 && useChatStore.getState().conversations[0]._id === peer2Id);
 
     // Active chat is peer1, so messages must still be empty for peer1
     expect(useChatStore.getState().messages.length).toBe(0);
@@ -200,7 +211,7 @@ describe("useChatStore unread counts & chat list (S6)", () => {
     };
 
     mockSocket.emit("newMessage", wireMsg);
-    await new Promise((r) => setTimeout(r, 60));
+    await waitFor(() => useChatStore.getState().messages.length === 1);
 
     // Decrypted in active chat
     expect(useChatStore.getState().messages.length).toBe(1);
@@ -208,7 +219,7 @@ describe("useChatStore unread counts & chat list (S6)", () => {
     expect(conv1.unreadCount).toBe(0);
 
     // Debounced markRead was called for peer1Id with msgId
-    await new Promise((r) => setTimeout(r, 350));
+    await waitFor(() => ax.post.mock.calls.some((c) => c[0] === `/messages/read/${peer1Id}`));
     const readCalls = ax.post.mock.calls.filter((c) => c[0] === `/messages/read/${peer1Id}`);
     expect(readCalls.length).toBeGreaterThanOrEqual(1);
     expect(readCalls[0][1]).toEqual({ upTo: msgId });
@@ -229,7 +240,7 @@ describe("useChatStore unread counts & chat list (S6)", () => {
     };
 
     mockSocket.emit("newMessage", wireMsg);
-    await new Promise((r) => setTimeout(r, 60));
+    await waitFor(() => useChatStore.getState().messages.length === 1);
 
     // Message is decrypted in chat
     expect(useChatStore.getState().messages.length).toBe(1);

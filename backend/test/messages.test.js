@@ -327,6 +327,46 @@ describe("sendMessage: v2 sessions", () => {
     }
   });
 
+  it("accepts valid v2 header with dh and pn", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const sid = "sess_12345678";
+    const validHeader = {
+      sessionId: sid,
+      n: 0,
+      pn: 5,
+      dh: b64(randomBytes(32)),
+    };
+    const r = await send(a, b, goodV2({ header: validHeader }));
+    expect(r.status).toBe(201);
+    expect(r.json.header.dh).toBe(validHeader.dh);
+    expect(r.json.header.pn).toBe(5);
+  });
+
+  it("rejects malformed dh in v2 header", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const sid = "sess_12345678";
+    for (const badDh of [
+      b64(randomBytes(31)),
+      b64(randomBytes(33)),
+      "not-base64-string!!",
+      12345,
+      null,
+      {},
+    ]) {
+      const r = await send(a, b, goodV2({ header: { sessionId: sid, n: 0, dh: badDh } }));
+      expect(r.status).toBe(400);
+    }
+  });
+
+  it("rejects negative or non-integer pn in v2 header", async () => {
+    const a = await mkUser(), b = await mkUser();
+    const sid = "sess_12345678";
+    for (const badPn of [-1, -10, 1.5, "0", "5", null, {}, NaN]) {
+      const r = await send(a, b, goodV2({ header: { sessionId: sid, n: 0, pn: badPn } }));
+      expect(r.status).toBe(400);
+    }
+  });
+
   it("rejects plaintext fields in v2 body", async () => {
     const a = await mkUser(), b = await mkUser();
     const r1 = await send(a, b, goodV2({ text: "leaked plaintext" }));

@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach } from "vitest";
 import {
   generateIdentity,
   generateSignedPrekey,
@@ -34,7 +34,7 @@ import {
   putPlain,
   getPlain,
 } from "../storage/keystore.js";
-import { set } from "idb-keyval";
+import { set, keys } from "idb-keyval";
 import { newSecret, xPub, dh } from "./primitives.js";
 
 let n = 0;
@@ -681,6 +681,9 @@ describe("S9: Double Ratchet", () => {
       bundle: bob.bundle(0),
     });
 
+    // Record initial DH private key to assert it gets replaced and purged from storage
+    const initialAliceDhPrivB64 = aliceSession.dhs.priv;
+
     const m0 = await ratchetEncrypt({
       session: aliceSession,
       envelope: { t: "text", body: "first", ts: 1 },
@@ -690,6 +693,7 @@ describe("S9: Double Ratchet", () => {
       myIk: alice.idn.ik,
       initialHeader,
     });
+    await saveSession(alice.userId, bob.userId, aliceSession);
 
     const { session: bobSession } = await ratchetDecrypt({
       receiverId: bob.userId,
@@ -700,8 +704,9 @@ describe("S9: Double Ratchet", () => {
       takeOpkPriv: (id) => takeOpkPriv(bob.userId, id),
       pinned: { ik: alice.idn.ik.pub, sik: alice.idn.sik.pub },
     });
+    await saveSession(bob.userId, alice.userId, bobSession);
 
-    // Exchange 5 messages in both directions
+    // Exchange 5 messages in both directions, saving to IndexedDB after each operation
     let curSender = "alice";
     for (let i = 1; i <= 5; i++) {
       if (curSender === "alice") {
@@ -713,6 +718,8 @@ describe("S9: Double Ratchet", () => {
           receiverId: bob.userId,
           myIk: alice.idn.ik,
         });
+        await saveSession(alice.userId, bob.userId, aliceSession);
+
         await ratchetDecrypt({
           session: bobSession,
           receiverId: bob.userId,
@@ -721,6 +728,7 @@ describe("S9: Double Ratchet", () => {
           msg,
           pinned: { ik: alice.idn.ik.pub, sik: alice.idn.sik.pub },
         });
+        await saveSession(bob.userId, alice.userId, bobSession);
         curSender = "bob";
       } else {
         const msg = await ratchetEncrypt({
@@ -731,6 +739,8 @@ describe("S9: Double Ratchet", () => {
           receiverId: alice.userId,
           myIk: bob.idn.ik,
         });
+        await saveSession(bob.userId, alice.userId, bobSession);
+
         await ratchetDecrypt({
           session: aliceSession,
           receiverId: alice.userId,
@@ -739,13 +749,34 @@ describe("S9: Double Ratchet", () => {
           msg,
           pinned: { ik: bob.idn.ik.pub, sik: bob.idn.sik.pub },
         });
+        await saveSession(alice.userId, bob.userId, aliceSession);
         curSender = "alice";
       }
     }
 
-    // Assert that session records only contain current chain keys, no old message keys
-    expect(bobSession.skippedKeys).toEqual({});
-    expect(aliceSession.skippedKeys).toEqual({});
+    // Direct IndexedDB storage inspection (not just in-memory objects)
+    const storedAlice = await loadSession(alice.userId, bob.userId);
+    const storedBob = await loadSession(bob.userId, alice.userId);
+
+    // 1. Assert skippedKeys in IndexedDB storage is empty (no unevicted or leaked keys)
+    expect(storedAlice.skippedKeys).toEqual({});
+    expect(storedBob.skippedKeys).toEqual({});
+
+    // 2. Assert that old ephemeral/DH private key from conversation start is completely gone from storage
+    const rawStoredAlice = JSON.stringify(storedAlice);
+    expect(rawStoredAlice).not.toContain(initialAliceDhPrivB64);
+
+    // 3. Assert no old message keys exist anywhere in IndexedDB
+    const allStorageKeys = await keys();
+    const sessionKeysInIdb = allStorageKeys.filter((k) => typeof k === "string" && k.startsWith("session:"));
+    expect(sessionKeysInIdb).toContain(`session:${alice.userId}:${bob.userId}`);
+    expect(sessionKeysInIdb).toContain(`session:${bob.userId}:${alice.userId}`);
+
+    // No lingering skipped key records or message key records anywhere in storage
+    const orphanKeyRecords = allStorageKeys.filter(
+      (k) => typeof k === "string" && (k.includes("mk:") || k.includes("skipped:"))
+    );
+    expect(orphanKeyRecords).toEqual([]);
   });
 
   it("post-compromise healing: clone the state at a point, continue the conversation, and show the cloned (stolen) state cannot decrypt messages after the next DH step", async () => {
@@ -944,5 +975,176 @@ describe("S9: Double Ratchet", () => {
     expect(upgraded.ns).toBe(0);
     expect(upgraded.nr).toBe(0);
     expect(upgraded.pn).toBe(0);
+  });
+
+  it("two simulated tabs sending and receiving concurrently on the same conversation maintain consistent state (no message lost or corrupted)", async () => {
+    const alice = await mkUserKeyMaterial();
+    const bob = await mkUserKeyMaterial();
+
+    const { session: initAlice, initialHeader } = await initiateRatchetSession({
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      mySik: alice.idn.sik,
+      bundle: bob.bundle(0),
+    });
+    await saveSession(alice.userId, bob.userId, initAlice);
+
+    const m0 = await ratchetEncrypt({
+      session: initAlice,
+      envelope: { t: "text", body: "m0", ts: 1 },
+      type: "text",
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      initialHeader,
+    });
+    await saveSession(alice.userId, bob.userId, initAlice);
+
+    const { session: initBob } = await ratchetDecrypt({
+      receiverId: bob.userId,
+      senderId: alice.userId,
+      myIk: bob.idn.ik,
+      msg: m0,
+      getSpkPriv: (id) => getSpkPriv(bob.userId, id),
+      takeOpkPriv: (id) => takeOpkPriv(bob.userId, id),
+      pinned: { ik: alice.idn.ik.pub, sik: alice.idn.sik.pub },
+    });
+    await saveSession(bob.userId, alice.userId, initBob);
+
+    // Simulated Tab 1 and Tab 2 sending concurrently from Alice to Bob
+    // Both tabs use withSessionLock to serialize read-modify-write on IndexedDB session
+    const tabSend = async (body) => {
+      return withSessionLock(alice.userId, bob.userId, async () => {
+        const session = await loadSession(alice.userId, bob.userId);
+        await new Promise((r) => setTimeout(r, 10)); // simulate asynchronous execution in tab
+        const payload = await ratchetEncrypt({
+          session,
+          envelope: { t: "text", body, ts: Date.now() },
+          type: "text",
+          senderId: alice.userId,
+          receiverId: bob.userId,
+          myIk: alice.idn.ik,
+        });
+        await saveSession(alice.userId, bob.userId, session);
+        return payload;
+      });
+    };
+
+    // Both tabs send concurrently
+    const [msgFromTab1, msgFromTab2] = await Promise.all([
+      tabSend("hello from tab 1"),
+      tabSend("hello from tab 2"),
+    ]);
+
+    // Counters must be sequential and distinct without collision
+    const counters = [msgFromTab1.header.n, msgFromTab2.header.n].sort((a, b) => a - b);
+    expect(counters).toEqual([1, 2]);
+
+    // Simulated Tab 1 and Tab 2 receiving concurrently on Bob's side
+    const tabReceive = async (msg) => {
+      return withSessionLock(bob.userId, alice.userId, async () => {
+        const session = await loadSession(bob.userId, alice.userId);
+        await new Promise((r) => setTimeout(r, 10));
+        const dec = await ratchetDecrypt({
+          session,
+          receiverId: bob.userId,
+          senderId: alice.userId,
+          myIk: bob.idn.ik,
+          msg,
+          pinned: { ik: alice.idn.ik.pub, sik: alice.idn.sik.pub },
+        });
+        await saveSession(bob.userId, alice.userId, dec.session);
+        return dec.envelope;
+      });
+    };
+
+    const [dec1, dec2] = await Promise.all([
+      tabReceive(msgFromTab1),
+      tabReceive(msgFromTab2),
+    ]);
+
+    const receivedTexts = [dec1.body, dec2.body];
+    expect(receivedTexts).toContain("hello from tab 1");
+    expect(receivedTexts).toContain("hello from tab 2");
+
+    // Verify Bob's final session state in IndexedDB is consistent and uncorrupted
+    const storedBob = await loadSession(bob.userId, alice.userId);
+    expect(storedBob.nr).toBe(3);
+    expect(storedBob.skippedKeys).toEqual({});
+  });
+
+  it("persists new ratchet state and plain cache to IndexedDB before message is shown and before ack", async () => {
+    const alice = await mkUserKeyMaterial();
+    const bob = await mkUserKeyMaterial();
+
+    const { session: aliceSession, initialHeader } = await initiateRatchetSession({
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      mySik: alice.idn.sik,
+      bundle: bob.bundle(0),
+    });
+
+    const m0 = await ratchetEncrypt({
+      session: aliceSession,
+      envelope: { t: "text", body: "persist check", ts: 100 },
+      type: "text",
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      initialHeader,
+    });
+    const msgId = "msg-persist-test-1";
+    const wireMsg = { ...m0, _id: msgId, senderId: alice.userId, receiverId: bob.userId };
+
+    // Set up pin for Bob
+    const { acceptKeyChange } = await import("../lib/safety.js");
+    await acceptKeyChange(bob.userId, alice.userId, {
+      ik: toB64(alice.idn.ik.pub),
+      sik: toB64(alice.idn.sik.pub),
+    });
+
+    const { readMessage } = await import("../lib/chatCrypto.js");
+
+    // Before message decryption: no session in Bob's storage and no plain cache
+    expect(await loadSession(bob.userId, alice.userId)).toBeNull();
+    expect(await getPlain(bob.userId, msgId)).toBeNull();
+
+    // Call readMessage
+    const res = await readMessage({ me: bob.userId, msg: wireMsg });
+
+    // Check that state in IndexedDB was persisted before return
+    const storedBob = await loadSession(bob.userId, alice.userId);
+    const cachedPlain = await getPlain(bob.userId, msgId);
+
+    expect(storedBob).not.toBeNull();
+    expect(storedBob.nr).toBe(1);
+    expect(cachedPlain).not.toBeNull();
+    expect(cachedPlain.body).toBe("persist check");
+    expect(res).toMatchObject({ state: "ok", text: "persist check" });
+
+    // Furthermore, if saveSession fails (storage error), decryptMessage fails closed
+    const m1 = await ratchetEncrypt({
+      session: aliceSession,
+      envelope: { t: "text", body: "fail closed", ts: 101 },
+      type: "text",
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+    });
+    const m1Wire = { ...m1, _id: "msg-persist-fail-2", senderId: alice.userId, receiverId: bob.userId };
+
+    const keystore = await import("../storage/keystore.js");
+    const saveSpy = vi.spyOn(keystore, "saveSession").mockRejectedValueOnce(new Error("IDB disk full"));
+    try {
+      // Must fail closed (returns non-ok error state, never plaintext)
+      const failRes = await readMessage({ me: bob.userId, msg: m1Wire });
+      expect(failRes.state).not.toBe("ok");
+      // Cache must NOT have been written
+      expect(await getPlain(bob.userId, m1Wire._id)).toBeNull();
+    } finally {
+      saveSpy.mockRestore();
+    }
   });
 });

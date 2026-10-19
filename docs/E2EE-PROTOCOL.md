@@ -232,3 +232,123 @@ No IK migration. New code uses @noble/curves and @noble/hashes only.
 - Storage file: Random 128-bit name, no extension, no original filename.
 - Direct browser-to-ImageKit upload using short-lived signed params from `GET /api/media/upload-auth`.
 - Provider swap: All blob I/O goes through `blobStore` interface.
+
+## Amendments (S1.4) - v2 Sessions (S8)
+
+### 1. Initiator (Handshake & Key Derivation)
+- Fetches peer's bundle with query parameter `?opk=1`.
+- Verifies peer's prekey bundle (`SIK` over `SPK`, `SIK` over `IK`, and pinned contact comparison).
+- Generates ephemeral keypair `EK_A`.
+- Computes X3DH agreement:
+  - `DH1 = DH(IK_A,  SPK_B)`
+  - `DH2 = DH(EK_A,  IK_B)`
+  - `DH3 = DH(EK_A,  SPK_B)`
+  - `DH4 = DH(EK_A,  OPK_B)` (only if an OPK was returned in the bundle)
+  - `SK  = HKDF-SHA256(salt = 32 zero bytes, ikm = 0xFF*32 || DH1 || DH2 || DH3 [|| DH4], info = "talk/x3dh/v2/session")`
+- Initial symmetric chain keys derived from `SK`:
+  - `CK_send = HKDF-SHA256(SK, salt = 32 zero bytes, info = "talk/v2/chain/init-send")`
+  - `CK_recv = HKDF-SHA256(SK, salt = 32 zero bytes, info = "talk/v2/chain/init-recv")`
+- Fallback: if OPK is absent (null/exhausted), 3-DH fallback is executed without DH4.
+
+### 2. Initial Message Header
+- Carries initial handshake fields in `header`:
+  - `sessionId`: unique session string identifier (16 bytes random hex or UUID).
+  - `n`: message sequence counter (starts at `0`).
+  - `ek`: base64-encoded `EK_A` public key (32 bytes).
+  - `spkId`: recipient's SPK id (integer).
+  - `opkId`: recipient's OPK id (integer or `null` if OPK was absent).
+  - `ik`: initiator's `IK_A` public key (32 bytes base64).
+  - `sik`: initiator's `SIK_A` public key (32 bytes base64).
+- Subsequent messages in an established session send only:
+  - `sessionId`: string.
+  - `n`: message sequence counter (integer).
+
+### 3. Responder (Verification, Handshake & One-Time Deletion)
+- Validates initial header fields (`ek`, `spkId`, `opkId`, `ik`, `sik`).
+- Looks up `SPK_B` private key by `spkId` from local store (must be active or within 7-day grace period).
+- If `opkId` is provided, fetches and atomically deletes `OPK_B` private key (`takeOpkPriv`). If `opkId` is unknown or already consumed, rejects closed with error (replay protection).
+- Verifies initiator's `SIK` signature over `IK_A`. Compares against pinned contact record; if changed, aborts with `key-changed`.
+- Recomputes identical `SK`:
+  - `DH1 = DH(SPK_B, IK_A)`
+  - `DH2 = DH(IK_B,  EK_A)`
+  - `DH3 = DH(SPK_B, EK_A)`
+  - `DH4 = DH(OPK_B, EK_A)` (if `opkId` was present)
+  - `SK  = HKDF-SHA256(...)`
+- Initial symmetric chain keys (inverts send/recv from initiator):
+  - `CK_send = HKDF-SHA256(SK, salt = 32 zero bytes, info = "talk/v2/chain/init-recv")`
+  - `CK_recv = HKDF-SHA256(SK, salt = 32 zero bytes, info = "talk/v2/chain/init-send")`
+- Atomically creates the session record in IndexedDB in the same transaction as OPK deletion.
+
+### 4. Session Record in IndexedDB (`session:<uid>:<peerId>`)
+- Schema:
+  - `peerId`: string.
+  - `sessionId`: string.
+  - `role`: `"initiator"` | `"responder"`.
+  - `sk`: Uint8Array (32 bytes).
+  - `chainKeySend`: Uint8Array (32 bytes).
+  - `chainKeyRecv`: Uint8Array (32 bytes).
+  - `sendCounter`: integer (starts at 0).
+  - `recvCounter`: integer (starts at 0).
+  - `peerIk`: string (base64).
+  - `peerSik`: string (base64).
+  - `createdAt`: integer (timestamp ms).
+  - `state`: `"pending"` | `"established"`.
+  - `skippedKeys`: Map or Record `{ [counter: number]: { key: string (b64), createdAt: number } }`.
+
+### 5. Message Format v2
+- `v`: `2`.
+- `type`: `"text"` | `"media"` | `"secret"`.
+- `cid`: client-generated UUID.
+- `header`: initial message fields or established session header (`{ sessionId, n }`).
+- `ciphertext`: base64 ciphertext of padded JSON envelope.
+- `nonce`: 12-byte random AES-GCM IV.
+- `AAD`:
+  ```
+  AAD = utf8("talk/aad/v2") || u8(v) || u8(typeCode)
+        || utf8(senderId)(24) || utf8(receiverId)(24)
+        || IK_sender(32) || IK_receiver(32)
+        || utf8(sessionId) || u32be(n)
+  ```
+  Binds the ciphertext to version, type, sender, receiver, identity keys, session ID, and counter `n`.
+
+### 6. Per-Message Key & Symmetric Chain
+- Signal-style symmetric KDF ratchet:
+  - Per-message key: `Mk = HMAC-SHA256(CK, 0x01)` (32 bytes).
+  - Next chain key: `CK_next = HMAC-SHA256(CK, 0x02)` (32 bytes).
+- Each message is encrypted with `Mk` and a fresh 12-byte random nonce.
+- `Mk` is never reused and is securely erased from memory after encryption/decryption.
+
+### 7. Out-of-Order Handling & Replay Protection
+- Maximum skip window: `MAX_SKIP = 100`.
+- If receiving `n > Nr`:
+  - If `n - Nr > MAX_SKIP`, reject immediately (fail closed, state unchanged).
+  - If `n - Nr <= MAX_SKIP`, advance `CK_recv` step-by-step from `Nr` to `n - 1`, storing derived keys in `skippedKeys[step] = { key: toB64(Mk), createdAt: Date.now() }`.
+  - Update `Nr = n + 1`.
+  - Decrypt with message key derived at index `n`.
+- If receiving `n < Nr`:
+  - Check `skippedKeys[n]`.
+  - If found: decrypt with stored key, then delete `skippedKeys[n]` immediately.
+  - If not found: reject message as duplicate/replayed (fail closed).
+
+### 8. Simultaneous Initiation (Race Resolution)
+- If both parties initiate a session concurrently (both send initial messages before receiving one):
+  - Compare initiator identity keys `IK_A` and `IK_B` lexicographically (bytewise).
+  - The session whose initiator has the lower `IK` wins and becomes the active primary session.
+  - The losing session is archived in a read-only secondary slot (`session-loser:<uid>:<peerId>`) for 7 days to decrypt any in-flight messages sent under it, after which it is pruned.
+
+### 9. SPK Rotation Grace Period
+- Active SPK rotates every 7 days.
+- Retired SPK private keys are kept in client IndexedDB (`spk:<uid>:<id>`) for a 7-day grace period (`SPK_ROTATE_MS`) before deletion, ensuring late or in-flight initial messages decrypt successfully.
+
+### 10. OPK Replenishment
+- Client checks remaining OPK count via `GET /api/keys/opks/count`.
+- When server count drops below 20 (`OPK_LOW_THRESHOLD = 20`), client generates 50 new OPKs (`generateOpks(uid, 50)`) and uploads them via `POST /api/keys/opks`.
+
+### 11. Identity-Key Change Handling
+- Pinned contact keys (`IK` and `SIK`) are checked before initiating or stepping any session.
+- If peer's `IK` or `SIK` changes from the pinned record:
+  - Block sending.
+  - Mark session as `key-changed`.
+  - Display user-visible safety number verification warning.
+  - Never automatically accept key changes.
+

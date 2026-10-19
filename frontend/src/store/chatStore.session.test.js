@@ -232,7 +232,9 @@ describe("S8 Integration & Store Sessions", () => {
     expect(sent2.header.sessionId).toBe(sentMsgAtoB.header.sessionId);
     // msg2 header has no ek/spkId since session is established
     expect(sent2.header.ek).toBeUndefined();
-    expect(sent2.header.n).toBe(1);
+    // Under Double Ratchet, receiving a reply triggers a DH step, so n resets to 0 and pn records previous chain length 1
+    expect(sent2.header.n).toBe(0);
+    expect(sent2.header.pn).toBe(1);
   });
 
   it("media messages work through v2 sessions with the per-file key inside encrypted payload", async () => {

@@ -70,11 +70,20 @@ function parseSendBody(b) {
   if (typeof h.sessionId !== "string" || h.sessionId.length < 8 || h.sessionId.length > 64) return { message: "bad-header" };
   if (typeof h.n !== "number" || !Number.isInteger(h.n) || h.n < 0) return { message: "bad-header" };
 
-  // Optional initial message fields
+  // Optional initial message fields & ratchet header fields
   const v2Header = { sessionId: h.sessionId, n: h.n };
-  const allowedV2HeaderKeys = new Set(["sessionId", "n", "ek", "spkId", "opkId", "ik", "sik"]);
+  const allowedV2HeaderKeys = new Set(["sessionId", "n", "pn", "dh", "ek", "spkId", "opkId", "ik", "sik"]);
   for (const hk of Object.keys(h)) {
     if (!allowedV2HeaderKeys.has(hk)) return { message: "bad-header" };
+  }
+
+  if (h.pn !== undefined) {
+    if (typeof h.pn !== "number" || !Number.isInteger(h.pn) || h.pn < 0) return { message: "bad-header" };
+    v2Header.pn = h.pn;
+  }
+  if (h.dh !== undefined) {
+    if (!b64Bytes(h.dh, 32)) return { message: "bad-header" };
+    v2Header.dh = h.dh;
   }
 
   if (h.ek !== undefined) {

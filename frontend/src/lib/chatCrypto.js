@@ -20,6 +20,11 @@ import {
   encryptSessionMessage,
   decryptSessionMessage,
   resolveSimultaneousInitiation,
+  initiateRatchetSession,
+  respondRatchetSession,
+  ratchetEncrypt,
+  ratchetDecrypt,
+  upgradeFromS8Session,
   fromB64,
   toB64,
   CryptoError,
@@ -77,7 +82,7 @@ export async function encryptEnvelope({ me, peerId, type = "text", envelope }) {
       const pinned = { ik: bundle.ikPub, sik: bundle.sikPub };
 
       try {
-        const init = await initiateSession({
+        const init = await initiateRatchetSession({
           senderId: me,
           receiverId: peerId,
           myIk: idn.ik,
@@ -100,10 +105,13 @@ export async function encryptEnvelope({ me, peerId, type = "text", envelope }) {
       if (pin && session.peerSik && pin.sik && pin.sik !== session.peerSik) {
         throw new SendError("key-changed");
       }
+      if (!session.rk || !session.dhs) {
+        session = upgradeFromS8Session(session);
+      }
     }
 
     try {
-      const payload = await encryptSessionMessage({
+      const payload = await ratchetEncrypt({
         session,
         envelope,
         type,
@@ -255,16 +263,30 @@ export async function readMessage({ me, msg }) {
     }
 
     try {
-      const dec = await decryptSessionMessage({
-        session,
-        receiverId: me,
-        senderId: msg.senderId,
-        myIk: idn.ik,
-        msg,
-        getSpkPriv: (id) => getSpkPriv(me, id),
-        takeOpkPriv: (id) => takeOpkPriv(me, id),
-        pinned: { ik: fromB64(pin.ik), sik: pin.sik ? fromB64(pin.sik) : null },
-      });
+      let dec;
+      if (msg.header?.dh) {
+        dec = await ratchetDecrypt({
+          session,
+          receiverId: me,
+          senderId: msg.senderId,
+          myIk: idn.ik,
+          msg,
+          getSpkPriv: (id) => getSpkPriv(me, id),
+          takeOpkPriv: (id) => takeOpkPriv(me, id),
+          pinned: { ik: fromB64(pin.ik), sik: pin.sik ? fromB64(pin.sik) : null },
+        });
+      } else {
+        dec = await decryptSessionMessage({
+          session,
+          receiverId: me,
+          senderId: msg.senderId,
+          myIk: idn.ik,
+          msg,
+          getSpkPriv: (id) => getSpkPriv(me, id),
+          takeOpkPriv: (id) => takeOpkPriv(me, id),
+          pinned: { ik: fromB64(pin.ik), sik: pin.sik ? fromB64(pin.sik) : null },
+        });
+      }
 
       const env = dec.envelope;
       if (env.t === "media") {

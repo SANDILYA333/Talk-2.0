@@ -11,4 +11,15 @@ export {
   kdfCk,
   MAX_SKIP,
 } from "./session.js";
+export {
+  initiateRatchetSession,
+  respondRatchetSession,
+  ratchetEncrypt,
+  ratchetDecrypt,
+  kdfRk,
+  upgradeFromS8Session,
+  MAX_TOTAL_SKIPPED,
+  SKIPPED_TTL_MS,
+  buildAadRatchet,
+} from "./ratchet.js";
 

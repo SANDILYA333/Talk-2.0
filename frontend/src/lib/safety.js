@@ -50,6 +50,9 @@ export async function checkContact(me, peer, cur) {
 export const markVerified = (me, peer, keys) =>
   set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: true, at: Date.now() });
 
+export const markUnverified = (me, peer, keys) =>
+  set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: false });
+
 export const acceptKeyChange = (me, peer, keys) =>
   set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: false });
 

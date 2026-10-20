@@ -12,16 +12,34 @@ import { putPlain } from "../storage/keystore";
 import { sortConversations } from "../lib/conversationView";
 
 import {
+  ERROR_CODES,
   normalizeErrorCode,
   PEER_KEY_CHANGED,
   DECRYPT_FAILED,
   SESSION_SETUP_FAILED,
   PEER_NO_KEYS,
+  DUPLICATE_MESSAGE,
+  HISTORY_UNAVAILABLE,
+  LOCAL_KEYS_MISSING,
+  MEDIA_DECRYPT_FAILED,
+  SESSION_RESET_REQUIRED,
+  TOO_MANY_SKIPPED,
+  UNSUPPORTED_VERSION,
 } from "../crypto/errors.js";
+import {
+  deleteSession,
+  loadSession,
+  loadIdentity,
+  saveLocalSystemMessage,
+  getLocalSystemMessages,
+} from "../storage/keystore";
+import { acceptKeyChange } from "../lib/safety";
+import { resetIdentity } from "../lib/identity";
 
 const meId = () => useAuthStore.getState().authUser?._id;
 const RETRYABLE = new Set([PEER_KEY_CHANGED, DECRYPT_FAILED, SESSION_SETUP_FAILED, "waiting-for-key", "key-changed", "undecryptable", "tampered"]);
 const mediaUploadContexts = new Map(); // cid -> { file, caption, previewUrl, abortController, processed, key, nonce, ciphertext, blobId, uploadedUrl, att }
+const errorToastTimes = new Map(); // convId -> timestamp
 
 const DEBOUNCE_DELAY = typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 30 : 300;
 
@@ -75,6 +93,17 @@ export const useChatStore = create(
       composerText: "",
       isSoundEnabled: true,
       isSendingMedia: false,
+      composerDisabledReason: null,
+      isSettingUpSession: false,
+      peerKeyChangedState: null,
+      localKeysMissing: false,
+      storageHealth: {
+        persistent: false,
+        persistDenied: false,
+        storageAvailable: true,
+        isPrivate: false,
+        noteDismissed: false,
+      },
 
       reset: () => {
         if (getConversationsTimer) {
@@ -107,6 +136,10 @@ export const useChatStore = create(
           isConversationsLoading: false,
           isUsersLoading: false,
           isMessagesLoading: false,
+          composerDisabledReason: null,
+          isSettingUpSession: false,
+          peerKeyChangedState: null,
+          localKeysMissing: false,
         });
         if (typeof document !== "undefined") {
           document.title = "TALK";
@@ -262,7 +295,19 @@ export const useChatStore = create(
           const me = meId();
           const list = Array.isArray(data?.messages) ? data.messages : [];
           const items = await Promise.all(list.map((m) => toItem(me, m)));
-          set({ messages: items, hasMore: data?.hasMore });
+
+          // Filter out DUPLICATE_MESSAGE
+          const cleanItems = items.filter(
+            (m) => m.state !== DUPLICATE_MESSAGE && m.failReason !== DUPLICATE_MESSAGE
+          );
+
+          // Load local system messages
+          const sysMsgs = me ? await getLocalSystemMessages(me, userId) : [];
+          const combined = [...cleanItems, ...sysMsgs].sort(
+            (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0)
+          );
+
+          set({ messages: combined, hasMore: data?.hasMore });
 
           const isVisible = typeof document === "undefined" || document.visibilityState === "visible";
           if (isVisible) {
@@ -290,7 +335,10 @@ export const useChatStore = create(
           const me = meId();
           const list = Array.isArray(data?.messages) ? data.messages : [];
           const items = await Promise.all(list.map((m) => toItem(me, m)));
-          set({ messages: [...items, ...get().messages], hasMore: data.hasMore });
+          const cleanItems = items.filter(
+            (m) => m.state !== DUPLICATE_MESSAGE && m.failReason !== DUPLICATE_MESSAGE
+          );
+          set({ messages: [...cleanItems, ...get().messages], hasMore: data.hasMore });
         } catch (e) {
           console.error(e);
         } finally {
@@ -299,9 +347,12 @@ export const useChatStore = create(
       },
 
       sendMessage: async (text) => {
-        const { selectedUser } = get();
+        const { selectedUser, peerKeyChangedState, composerDisabledReason } = get();
         const body = (typeof text === "string" ? text : text?.text ?? "").trim();
         if (!selectedUser || !body) return false;
+        if (peerKeyChangedState?.peerId === selectedUser._id || composerDisabledReason === PEER_NO_KEYS) {
+          return false;
+        }
         const me = meId(), peerId = selectedUser._id;
         const cid = crypto.randomUUID();
         set((s) => ({
@@ -318,7 +369,12 @@ export const useChatStore = create(
       _deliver: async ({ cid, me, peerId, text }) => {
         const patch = (p) => set((s) => ({ messages: s.messages.map((m) => (m.cid === cid ? { ...m, ...p } : m)) }));
         try {
+          const session = await loadSession(me, peerId);
+          if (!session) {
+            set({ isSettingUpSession: true });
+          }
           const { payload, envelope } = await encryptText({ me, peerId, text });
+          set({ isSettingUpSession: false });
           const { data } = await axiosInstance.post(`/messages/send/${peerId}`, { cid, ...payload });
           await putPlain(me, data._id, { t: envelope.t, body: envelope.body, ts: envelope.ts });
           patch({ _id: data._id, createdAt: data.createdAt, state: "ok", failReason: undefined });
@@ -358,7 +414,13 @@ export const useChatStore = create(
 
           get().getConversations();
         } catch (e) {
+          set({ isSettingUpSession: false });
           const failReason = normalizeErrorCode(e.code ?? e.response?.data?.message ?? e.message ?? "network");
+          if (failReason === PEER_KEY_CHANGED) {
+            set({ peerKeyChangedState: { peerId } });
+          } else if (failReason === PEER_NO_KEYS) {
+            set({ composerDisabledReason: PEER_NO_KEYS });
+          }
           patch({ state: "failed", failReason });
         }
       },
@@ -552,6 +614,7 @@ export const useChatStore = create(
 
           get().getConversations();
         } catch (e) {
+          set({ isSettingUpSession: false });
           if (ctx.abortController?.signal?.aborted || e.name === "AbortError") {
             patch({ state: "cancelled" });
             return;
@@ -572,6 +635,11 @@ export const useChatStore = create(
             failReason = normalizeErrorCode(e.response.data.message);
           } else if (msg) {
             failReason = normalizeErrorCode(msg);
+          }
+          if (failReason === PEER_KEY_CHANGED) {
+            set({ peerKeyChangedState: { peerId } });
+          } else if (failReason === PEER_NO_KEYS) {
+            set({ composerDisabledReason: PEER_NO_KEYS });
           }
           patch({ state: "failed", failReason });
         }
@@ -622,6 +690,86 @@ export const useChatStore = create(
         set({ messages: next });
       },
 
+      handleIncomingMessage: async (itemOrMsg) => {
+        get().getConversations();
+
+        const me = meId();
+        if (!me) return;
+        const item =
+          itemOrMsg && (itemOrMsg.role || itemOrMsg.state)
+            ? itemOrMsg
+            : await toItem(me, itemOrMsg);
+
+        // C. DUPLICATE_MESSAGE: dropped silently, never rendered
+        if (item.state === DUPLICATE_MESSAGE || item.failReason === DUPLICATE_MESSAGE) {
+          return;
+        }
+
+        if (item.state === PEER_KEY_CHANGED || item.failReason === PEER_KEY_CHANGED) {
+          set({ peerKeyChangedState: { peerId: item.senderId } });
+        }
+
+        const { selectedUser, conversations } = get();
+        const partnerId = item.senderId;
+        const isChatOpen = selectedUser?._id === partnerId;
+        const isVisible = typeof document === "undefined" || document.visibilityState === "visible";
+
+        if (isChatOpen) {
+          set((s) => (s.messages.some((m) => m._id === item._id) ? s : { messages: [...s.messages, item] }));
+        }
+
+        // Local conversation patch
+        const snippet = item.text || "Encrypted message";
+        const existing = conversations.find((c) => c._id === partnerId);
+        const shouldCountUnread = !(isChatOpen && isVisible);
+
+        let updatedConvs;
+        if (existing) {
+          const unreadCount = shouldCountUnread ? (existing.unreadCount || 0) + 1 : 0;
+          updatedConvs = conversations.map((c) =>
+            c._id === partnerId
+              ? {
+                  ...c,
+                  unreadCount,
+                  snippet,
+                  lastMessage: {
+                    _id: item._id,
+                    senderId: item.senderId,
+                    receiverId: item.receiverId,
+                    createdAt: item.createdAt,
+                    type: item.type,
+                  },
+                }
+              : c
+          );
+        } else {
+          updatedConvs = [
+            {
+              _id: partnerId,
+              fullName: "User",
+              unreadCount: shouldCountUnread ? 1 : 0,
+              snippet,
+              lastMessage: {
+                _id: item._id,
+                senderId: item.senderId,
+                receiverId: item.receiverId,
+                createdAt: item.createdAt,
+                type: item.type,
+              },
+            },
+            ...conversations,
+          ];
+        }
+
+        const sorted = sortConversations(updatedConvs);
+        set({ conversations: sorted });
+        updateTitle(sorted);
+
+        if (isChatOpen && isVisible && item._id) {
+          get().markRead(partnerId, item._id);
+        }
+      },
+
       listenForMessages: () => {
         initVisibilityListeners();
         const socket = useAuthStore.getState().socket;
@@ -633,73 +781,129 @@ export const useChatStore = create(
           get().getConversations();
         });
 
-        socket.on("newMessage", async (msg) => {
-          get().getConversations();
-
-          const me = meId();
-          if (!me) return;
-          const item = await toItem(me, msg);
-
-          const { selectedUser, conversations } = get();
-          const partnerId = msg.senderId;
-          const isChatOpen = selectedUser?._id === partnerId;
-          const isVisible = typeof document === "undefined" || document.visibilityState === "visible";
-
-          if (isChatOpen) {
-            set((s) => (s.messages.some((m) => m._id === item._id) ? s : { messages: [...s.messages, item] }));
-          }
-
-          // Local conversation patch
-          const snippet = item.text || "Encrypted message";
-          const existing = conversations.find((c) => c._id === partnerId);
-          const shouldCountUnread = !(isChatOpen && isVisible);
-
-          let updatedConvs;
-          if (existing) {
-            const unreadCount = shouldCountUnread ? (existing.unreadCount || 0) + 1 : 0;
-            updatedConvs = conversations.map((c) =>
-              c._id === partnerId
-                ? {
-                    ...c,
-                    unreadCount,
-                    snippet,
-                    lastMessage: {
-                      _id: msg._id,
-                      senderId: msg.senderId,
-                      receiverId: msg.receiverId,
-                      createdAt: msg.createdAt,
-                      type: msg.type,
-                    },
-                  }
-                : c
-            );
-          } else {
-            updatedConvs = [
-              {
-                _id: partnerId,
-                fullName: "User",
-                unreadCount: shouldCountUnread ? 1 : 0,
-                snippet,
-                lastMessage: {
-                  _id: msg._id,
-                  senderId: msg.senderId,
-                  receiverId: msg.receiverId,
-                  createdAt: msg.createdAt,
-                  type: msg.type,
-                },
-              },
-              ...conversations,
-            ];
-          }
-
-          const sorted = sortConversations(updatedConvs);
-          set({ conversations: sorted });
-          updateTitle(sorted);
-
-          if (isChatOpen && isVisible) {
-            get().markRead(partnerId, msg._id);
-          }
+        socket.on("newMessage", (msg) => {
+          get().handleIncomingMessage(msg);
         });
+      },
+
+      addLocalSystemMessage: async (peerId, text) => {
+        const me = meId();
+        const sysMsg = {
+          _id: "sys-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+          isSystem: true,
+          text,
+          createdAt: new Date().toISOString(),
+          time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        };
+        if (me && peerId) {
+          await saveLocalSystemMessage(me, peerId, sysMsg);
+        }
+        set((s) => ({ messages: [...s.messages, sysMsg] }));
+        return sysMsg;
+      },
+
+      loadLocalSystemMessages: async (meIdOrPeerId, peerIdOpt) => {
+        const me = peerIdOpt ? meIdOrPeerId : meId();
+        const peer = peerIdOpt || meIdOrPeerId;
+        return getLocalSystemMessages(me, peer);
+      },
+
+      resetSession: async (peerId) => {
+        const me = meId();
+        if (me && peerId) {
+          await deleteSession(me, peerId);
+        }
+        await get().addLocalSystemMessage(peerId, "You reset the secure session");
+        set({ peerKeyChangedState: null, isSettingUpSession: false, composerDisabledReason: null });
+      },
+
+      checkLocalKeysExist: async (userId) => {
+        const uid = userId || meId();
+        if (!uid) return true;
+        const idn = await loadIdentity(uid);
+        const exists = Boolean(idn && idn.ik);
+        set({ localKeysMissing: !exists });
+        return exists;
+      },
+
+      resetLocalKeys: async (authUser) => {
+        const user = authUser || useAuthStore.getState().authUser;
+        if (user) {
+          try {
+            await resetIdentity(user);
+          } catch (_) {}
+        }
+        set({ localKeysMissing: false });
+      },
+
+      checkStorageHealth: async () => {
+        let persistent = false;
+        let persistDenied = false;
+        let storageAvailable = true;
+        let isPrivate = false;
+
+        if (typeof navigator !== "undefined" && navigator.storage?.persist) {
+          try {
+            persistent = await navigator.storage.persist();
+            if (!persistent) persistDenied = true;
+          } catch (_) {
+            persistDenied = true;
+          }
+        }
+
+        if (typeof navigator !== "undefined" && navigator.storage?.estimate) {
+          try {
+            const est = await navigator.storage.estimate();
+            if (est.quota && est.quota < 120 * 1024 * 1024) {
+              isPrivate = true;
+            }
+          } catch (_) {}
+        }
+
+        const health = {
+          persistent,
+          persistDenied,
+          storageAvailable,
+          isPrivate,
+          noteDismissed: get().storageHealth?.noteDismissed || false,
+        };
+        set({ storageHealth: health });
+        return health;
+      },
+
+      dismissStorageHealthNote: () => {
+        set((s) => ({
+          storageHealth: { ...(s.storageHealth || {}), noteDismissed: true },
+        }));
+      },
+
+      canShowErrorToast: (cid, now = Date.now()) => {
+        const key = cid || "global";
+        if (errorToastTimes.has(key)) {
+          const last = errorToastTimes.get(key);
+          if (now - last < 10000) {
+            return false;
+          }
+        }
+        errorToastTimes.set(key, now);
+        return true;
+      },
+
+      acceptNewKey: async (peerId) => {
+        const me = meId();
+        if (me && peerId) {
+          try {
+            const { data } = await axiosInstance.get(`/identity/key/${peerId}`);
+            await acceptKeyChange(me, peerId, { ik: data.publicKey, sik: data.sik });
+            await get().addLocalSystemMessage(peerId, "Safety number changed");
+            await get().reprocess();
+          } catch (_) {}
+        }
+        set({ peerKeyChangedState: null });
+      },
+
+      cancelKeyChange: (peerId) => {
+        set({ peerKeyChangedState: null });
       },
 
       unsubscribeFromMessages: () => {

@@ -23,6 +23,10 @@ export function ChatHeader() {
   const authUser = useAuthStore((state) => state.authUser);
   const { activeConversation, selectedUser, isLargeScreen } = useSelectedConversation();
 
+  const isSSR = typeof window === "undefined";
+  const chatState = isSSR ? useChatStore.getState() : null;
+  const peerKeyChangedState = isSSR ? chatState.peerKeyChangedState : useChatStore((state) => state.peerKeyChangedState);
+
   const [trust, setTrust] = useState(null);
   const [showSafety, setShowSafety] = useState(false);
 
@@ -78,15 +82,25 @@ export function ChatHeader() {
                 </p>
                 <button
                   type="button"
+                  role="button"
+                  aria-label="Security status and safety number"
                   onClick={() => setShowSafety(true)}
-                  disabled={!trust || trust.status === "no-keys"}
-                  className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2 py-0.5 text-xs font-medium cursor-pointer hover:bg-muted/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={trust?.status === "no-keys"}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium cursor-pointer transition-colors ${
+                    trust?.status === "changed" || peerKeyChangedState
+                      ? "border-amber-400 bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200"
+                      : trust?.verified
+                      ? "border-green-400 bg-green-50 text-green-700 dark:bg-green-950/70 dark:text-green-300"
+                      : "border-border bg-surface text-foreground hover:bg-muted/10"
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
                 >
-                  {trust?.status === "no-keys"
-                    ? "⏳ No keys yet"
+                  {trust?.status === "changed" || peerKeyChangedState
+                    ? "⚠️ Needs attention"
                     : trust?.verified
                     ? "🔒 Verified"
-                    : "🔓 Verify"}
+                    : trust?.status === "no-keys"
+                    ? "⏳ No keys yet"
+                    : "🔒 Encrypted"}
                 </button>
               </div>
               <p className="truncate text-xs text-muted">

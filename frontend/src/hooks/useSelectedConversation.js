@@ -52,17 +52,23 @@ function mapUserToConversation({ user, messages, authUser, onlineUsers }) {
 }
 
 export function useSelectedConversation() {
-  const activeConversationId = useChatStore((state) => state.activeConversationId);
-  const conversations = useChatStore((state) => state.conversations);
-  const users = useChatStore((state) => state.users);
-  const messages = useChatStore((state) => state.messages);
+  const isSSR = typeof window === "undefined";
+  const chatState = isSSR ? useChatStore.getState() : null;
+  const authState = isSSR ? useAuthStore.getState() : null;
 
-  const authUser = useAuthStore((state) => state.authUser);
-  const onlineUsers = useAuthStore((state) => state.onlineUsers);
+  const activeConversationId = isSSR
+    ? chatState.activeConversationId
+    : useChatStore((state) => state.activeConversationId);
+  const conversations = isSSR ? chatState.conversations : useChatStore((state) => state.conversations);
+  const users = isSSR ? chatState.users : useChatStore((state) => state.users);
+  const messages = isSSR ? chatState.messages : useChatStore((state) => state.messages);
+
+  const authUser = isSSR ? authState.authUser : useAuthStore((state) => state.authUser);
+  const onlineUsers = isSSR ? authState.onlineUsers : useAuthStore((state) => state.onlineUsers);
 
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
-  const storeSelectedUser = useChatStore((state) => state.selectedUser);
+  const storeSelectedUser = isSSR ? chatState.selectedUser : useChatStore((state) => state.selectedUser);
 
   const selectedUser = activeConversationId
     ? (storeSelectedUser?._id === activeConversationId ? storeSelectedUser : null) ||

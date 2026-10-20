@@ -5,12 +5,34 @@ import { useChatStore } from "../../store/useChatStore";
 import { useAuthStore } from "../../store/useAuthStore";
 import { loadMedia } from "../../lib/chatCrypto";
 import { safePlaceholderDataUrl } from "../../lib/mediaSecurity";
+import {
+  DECRYPT_FAILED,
+  HISTORY_UNAVAILABLE,
+  MEDIA_DECRYPT_FAILED,
+  TOO_MANY_SKIPPED,
+  SESSION_RESET_REQUIRED,
+  UNSUPPORTED_VERSION,
+  PEER_NO_KEYS,
+  PEER_KEY_CHANGED,
+  SESSION_SETUP_FAILED,
+} from "../../crypto/errors.js";
 
 export function MessageBubble({ message }) {
   const retrySend = useChatStore((state) => state.retrySend);
   const cancelMediaUpload = useChatStore((state) => state.cancelMediaUpload);
   const selectedUser = useChatStore((state) => state.selectedUser);
   const authUserId = useAuthStore((state) => state.authUser?._id);
+
+  if (message.isSystem) {
+    return (
+      <div className="my-2 flex w-full justify-center select-none">
+        <div className="rounded-full border border-border/50 bg-surface/80 px-3 py-1 text-center text-xs text-muted">
+          <span>{message.text}</span>
+          {message.time && <span className="ml-2 opacity-60 tabular-nums">{message.time}</span>}
+        </div>
+      </div>
+    );
+  }
 
   const isOwnMessage = message.role === "me";
   const state = message.state || "ok";
@@ -56,20 +78,29 @@ export function MessageBubble({ message }) {
   };
 
   const getFailureReasonText = () => {
-    if (message.failReason === "too-big") {
-      return "Attachment exceeds 25 MB";
+    switch (message.failReason) {
+      case "too-big":
+        return "Attachment exceeds 25 MB";
+      case "unsupported-type":
+      case UNSUPPORTED_VERSION:
+        return "Unsupported file format";
+      case PEER_NO_KEYS:
+      case "recipient-no-keys": {
+        const name = selectedUser?.fullName || "They";
+        return `${name} hasn't set up secure messaging yet`;
+      }
+      case PEER_KEY_CHANGED:
+      case "key-changed":
+        return "Their security key changed. Verify in the header";
+      case SESSION_SETUP_FAILED:
+        return "Couldn't set up secure session";
+      case DECRYPT_FAILED:
+        return "Decryption failed";
+      case HISTORY_UNAVAILABLE:
+        return "Older message not available on this device";
+      default:
+        return "Check your connection";
     }
-    if (message.failReason === "unsupported-type") {
-      return "Unsupported file format";
-    }
-    if (message.failReason === "recipient-no-keys") {
-      const name = selectedUser?.fullName || "They";
-      return `${name} hasn't set up secure messaging yet`;
-    }
-    if (message.failReason === "key-changed") {
-      return "Their security key changed. Verify in the header";
-    }
-    return "Check your connection";
   };
 
   const placeholderUrl = safePlaceholderDataUrl(att?.ph);
@@ -211,6 +242,7 @@ export function MessageBubble({ message }) {
         return (
           <button
             type="button"
+            aria-label="Retry sending message"
             onClick={() => message.cid && retrySend(message.cid)}
             className="text-left cursor-pointer group"
           >
@@ -229,6 +261,50 @@ export function MessageBubble({ message }) {
               {getFailureReasonText()}
             </p>
           </button>
+        );
+
+      case HISTORY_UNAVAILABLE:
+        return (
+          <p className="italic text-muted text-xs">
+            Older message not available on this device
+          </p>
+        );
+
+      case MEDIA_DECRYPT_FAILED:
+        return (
+          <div className="flex items-center gap-2 rounded-lg bg-surface/60 p-2 text-xs italic text-muted">
+            <AlertCircle className="size-4 shrink-0 text-muted" />
+            <span>Attachment unavailable</span>
+          </div>
+        );
+
+      case TOO_MANY_SKIPPED:
+      case SESSION_RESET_REQUIRED:
+        return (
+          <div className="space-y-1">
+            <p className="font-medium text-red-500 dark:text-red-400 text-xs">
+              Secure session reset required
+            </p>
+            <button
+              type="button"
+              aria-label="Reset session"
+              onClick={() => {
+                const peerId = message.senderId || selectedUser?._id;
+                if (
+                  peerId &&
+                  typeof window !== "undefined" &&
+                  window.confirm(
+                    "Reset secure session? Undelivered and in-flight messages will be lost."
+                  )
+                ) {
+                  useChatStore.getState().resetSession(peerId);
+                }
+              }}
+              className="text-xs font-semibold text-blue-500 underline cursor-pointer hover:text-blue-600"
+            >
+              Reset session
+            </button>
+          </div>
         );
 
       case "undecryptable":
@@ -273,10 +349,11 @@ export function MessageBubble({ message }) {
           </p>
         );
 
+      case DECRYPT_FAILED:
       case "decrypt-failed":
         return (
           <p className="font-medium text-red-500 dark:text-red-400 text-xs">
-            Failed to decrypt message
+            Couldn&apos;t decrypt this message
           </p>
         );
 

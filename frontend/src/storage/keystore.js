@@ -172,3 +172,17 @@ export function wipeKeyMaterial(uid) {
     for (const k of [K.spkCur(uid), K.spkNext(uid), K.opkNext(uid)]) await del(k);
   });
 }
+
+// ---------- local system messages ----------
+export async function saveLocalSystemMessage(uid, peerId, msg) {
+  const key = `sys-msgs:${uid}:${peerId}`;
+  const existing = (await get(key)) || [];
+  existing.push(msg);
+  await set(key, existing);
+  return existing;
+}
+
+export async function getLocalSystemMessages(uid, peerId) {
+  return (await get(`sys-msgs:${uid}:${peerId}`)) || [];
+}
+

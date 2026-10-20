@@ -43,6 +43,17 @@ let n = 0;
 const uid = () => (++n).toString(16).padStart(24, "0");
 const b64 = (u) => Buffer.from(u).toString("base64");
 
+async function waitFor(fn, timeout = 2000, interval = 15) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      if (fn()) return;
+    } catch {}
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  fn();
+}
+
 async function mkUser() {
   const id = uid();
   const kp = nacl.box.keyPair();
@@ -199,7 +210,7 @@ describe("useChatStore E2EE", () => {
     };
 
     mockSocket.emit("newMessage", wireMsg);
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => useChatStore.getState().messages.length === 1);
 
     expect(useChatStore.getState().messages.length).toBe(1);
     expect(useChatStore.getState().messages[0]).toMatchObject({
@@ -227,7 +238,7 @@ describe("useChatStore E2EE", () => {
     };
 
     mockSocket.emit("newMessage", wireMsg);
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => ax.get.mock.calls.some((c) => c[0] === "/messages/conversations"));
 
     expect(useChatStore.getState().messages.length).toBe(0);
     expect(ax.get.mock.calls.some((c) => c[0] === "/messages/conversations")).toBe(true);

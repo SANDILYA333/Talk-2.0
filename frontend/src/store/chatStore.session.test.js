@@ -181,7 +181,7 @@ describe("S8 Integration & Store Sessions", () => {
     useChatStore.getState().listenForMessages();
 
     mockSocket.emit("newMessage", sentMsgAtoB);
-    await new Promise((r) => setTimeout(r, 60));
+    await waitFor(() => useChatStore.getState().messages.length === 1);
 
     const bobMsgs = useChatStore.getState().messages;
     expect(bobMsgs.length).toBe(1);

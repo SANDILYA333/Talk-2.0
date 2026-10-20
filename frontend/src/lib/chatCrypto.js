@@ -44,6 +44,8 @@ import {
   STORAGE_UNAVAILABLE,
   UNSUPPORTED_VERSION,
   MEDIA_DECRYPT_FAILED,
+  verifyBundle,
+  equal,
 } from "../crypto/index.js";
 import { decryptBlob } from "./mediaCrypto.js";
 import { blobStore } from "./blobStore.js";
@@ -167,7 +169,12 @@ async function currentKeys(peerId) {
 function fetchAndPin(me, senderId) {
   if (!pinInflight.has(senderId)) {
     const p = (async () => {
-      const cur = await currentKeys(senderId);
+      const bundle = await cachedBundle(senderId, { opk: false });
+      const check = verifyBundle(bundle, {});
+      if (!check.ok) {
+        throw new CryptoError(SESSION_SETUP_FAILED, "bad-bundle-signature");
+      }
+      const cur = { ik: toB64(bundle.ikPub), sik: toB64(bundle.sikPub) };
       await checkContact(me, senderId, cur);
       return readPin(me, senderId);
     })().finally(() => pinInflight.delete(senderId));
@@ -209,7 +216,12 @@ export async function readMessage({ me, msg }) {
 
   let pin = await readPin(me, msg.senderId);
   if (!pin) {
-    try { pin = await fetchAndPin(me, msg.senderId); } catch { return { state: "waiting-for-key" }; }
+    try {
+      pin = await fetchAndPin(me, msg.senderId);
+    } catch (e) {
+      if (e instanceof CryptoError) return { state: e.code };
+      return { state: "waiting-for-key" };
+    }
     if (!pin) return { state: "waiting-for-key" };
   }
 
@@ -250,6 +262,15 @@ export async function readMessage({ me, msg }) {
   return withSessionLock(me, msg.senderId, async () => {
     let session = await loadSession(me, msg.senderId);
     let isLoserSession = false;
+
+    if (pin) {
+      if (msg.header?.ik && !equal(fromB64(pin.ik), fromB64(msg.header.ik))) return { state: PEER_KEY_CHANGED };
+      if (msg.header?.sik && pin.sik && !equal(fromB64(pin.sik), fromB64(msg.header.sik))) return { state: PEER_KEY_CHANGED };
+      if (session && session.sessionId === msg.header?.sessionId) {
+        if (session.peerIk && pin.ik !== session.peerIk) return { state: PEER_KEY_CHANGED };
+        if (session.peerSik && pin.sik && pin.sik !== session.peerSik) return { state: PEER_KEY_CHANGED };
+      }
+    }
 
     // Check simultaneous initiation tie-breaking if session is pending and an incoming initial message arrives
     if (session && session.state === "pending" && msg.header?.ek && msg.header?.sessionId !== session.sessionId) {

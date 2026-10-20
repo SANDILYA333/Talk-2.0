@@ -1,7 +1,7 @@
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
-import { concat, utf8, fromUtf8, toB64, fromB64, randomBytes } from "./bytes.js";
+import { concat, utf8, fromUtf8, toB64, fromB64, randomBytes, equal } from "./bytes.js";
 import { newSecret, xPub, dh } from "./primitives.js";
 import { x3dhInitiate, x3dhRespond } from "./x3dh.js";
 import { aeadEncrypt, aeadDecrypt, u32be, TYPE } from "./aead.js";
@@ -219,11 +219,14 @@ export async function respondRatchetSession({ receiverId, senderId, myIk, spkPri
 
   if (pinned?.ik) {
     const pinnedIk = typeof pinned.ik === "string" ? fromB64(pinned.ik) : pinned.ik;
-    let match = true;
-    for (let i = 0; i < 32; i++) {
-      if (pinnedIk[i] !== ikPubA[i]) { match = false; break; }
-    }
-    if (!match) throw new CryptoError(PEER_KEY_CHANGED);
+    if (!equal(pinnedIk, ikPubA)) throw new CryptoError(PEER_KEY_CHANGED);
+  }
+
+  if (pinned?.sik) {
+    const sikPubA = header.sik ? fromB64(header.sik) : null;
+    if (!sikPubA || sikPubA.length !== 32) throw new CryptoError(PEER_KEY_CHANGED);
+    const pinnedSik = typeof pinned.sik === "string" ? fromB64(pinned.sik) : pinned.sik;
+    if (!equal(pinnedSik, sikPubA)) throw new CryptoError(PEER_KEY_CHANGED);
   }
 
   const sk = x3dhRespond({

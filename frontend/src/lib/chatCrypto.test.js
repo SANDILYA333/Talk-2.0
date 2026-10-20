@@ -185,15 +185,67 @@ describe("readMessage", () => {
     for (const t of ["1", "2", "3"]) msgs.push(wire(A, B, (await encryptText({ me: A, peerId: B, text: t })).payload));
     const rs = await Promise.all(msgs.map((msg) => readMessage({ me: B, msg })));
     expect(rs.map((r) => r.text)).toEqual(["1", "2", "3"]);
-    expect(calls("/identity/key")).toBe(1);
+    expect(calls("/keys/bundle/" + A)).toBe(1);
     expect(await readPin(B, A)).toMatchObject({ verified: false });
   });
-  it("waiting-for-key when the sender's key cannot be fetched, then ok", async () => {
+  it("waiting-for-key when the sender's bundle cannot be fetched, then ok", async () => {
     const { A, B, msg } = await flow();
-    down.keys.add(A);
+    down.bundle.add(A);
     expect((await readMessage({ me: B, msg })).state).toBe("waiting-for-key");
-    down.keys.delete(A);
+    down.bundle.delete(A);
     expect((await readMessage({ me: B, msg })).state).toBe("ok");
+  });
+  it("R1.2: unpinned first contact with a valid bundle pins and decrypts", async () => {
+    const A = await mkUser(), B = await mkUser();
+    expect(await readPin(B, A)).toBeNull();
+    const { payload } = await encryptText({ me: A, peerId: B, text: "first contact" });
+    const msg = wire(A, B, payload);
+    const res = await readMessage({ me: B, msg });
+    expect(res.state).toBe("ok");
+    expect(res.text).toBe("first contact");
+    const pin = await readPin(B, A);
+    expect(pin).not.toBeNull();
+    expect(pin.verified).toBe(false);
+  });
+  it("R1.2: a bundle with a bad ikBinding is rejected and not pinned", async () => {
+    const A = await mkUser(), B = await mkUser();
+    expect(await readPin(B, A)).toBeNull();
+    const { payload } = await encryptText({ me: A, peerId: B, text: "hello" });
+    const msg = wire(A, B, payload);
+
+    // Mock bundle fetch to return a corrupt ikBinding
+    const realBundle = await bundleOf(A);
+    const badBundle = { ...realBundle, ikBinding: toB64(new Uint8Array(64).fill(0xee)) };
+    ax.get.mockImplementation(async (url) => {
+      if (url.startsWith("/keys/bundle/" + A)) {
+        return { data: badBundle };
+      }
+      return { data: await bundleOf(url.split("/").pop()) };
+    });
+
+    const res = await readMessage({ me: B, msg });
+    expect(res.state).toBe(SESSION_SETUP_FAILED);
+    // Peer MUST NOT have been pinned
+    expect(await readPin(B, A)).toBeNull();
+  });
+  it("R1.2: a tampered header.ik with a pinned peer is rejected with PEER_KEY_CHANGED", async () => {
+    const A = await mkUser(), B = await mkUser();
+    // Establish pin first
+    const { payload: p1 } = await encryptText({ me: A, peerId: B, text: "pin me" });
+    expect((await readMessage({ me: B, msg: wire(A, B, p1) })).state).toBe("ok");
+
+    // Tamper header.ik on a subsequent initial message
+    const { payload: p2 } = await encryptText({ me: A, peerId: B, text: "tamper ik" });
+    const otherKp = nacl.box.keyPair();
+    const tamperedPayload = {
+      ...p2,
+      header: {
+        ...p2.header,
+        ik: b64(otherKp.publicKey),
+      },
+    };
+    const res = await readMessage({ me: B, msg: wire(A, B, tamperedPayload) });
+    expect(res.state).toBe(PEER_KEY_CHANGED);
   });
   it("unsupported version never touches the network", async () => {
     const { B, msg } = await flow();

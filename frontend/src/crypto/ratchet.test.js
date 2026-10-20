@@ -1264,4 +1264,61 @@ describe("S9: Double Ratchet", () => {
     // Bob's OPK MUST NOT be consumed by Eve's forged message
     expect(await getOpkPriv(bob.userId, opkId)).not.toBeNull();
   });
+
+  it("R1.2: a tampered header.sik with a pinned peer gives PEER_KEY_CHANGED and no session", async () => {
+    const { getOpkPriv, deleteOpkPriv } = await import("../storage/keystore.js");
+    const { PEER_KEY_CHANGED } = await import("../crypto/errors.js");
+    const alice = await mkUserKeyMaterial();
+    const bob = await mkUserKeyMaterial();
+    const bobBundle = bob.bundle(0);
+
+    const { session: aliceSession, initialHeader } = await initiateRatchetSession({
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      mySik: alice.idn.sik,
+      bundle: bobBundle,
+      pinned: { ik: bob.idn.ik.pub, sik: bob.idn.sik.pub },
+    });
+
+    const msg = await ratchetEncrypt({
+      session: aliceSession,
+      envelope: { t: "text", body: "hello", ts: 100 },
+      type: "text",
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      initialHeader,
+    });
+
+    // Tamper header.sik (replace with a different valid 32-byte Ed25519 pub key)
+    const otherIdn = generateIdentity();
+    const tamperedMsg = {
+      ...msg,
+      header: {
+        ...msg.header,
+        sik: toB64(otherIdn.sik.pub),
+      },
+    };
+
+    let thrownError = null;
+    try {
+      await ratchetDecrypt({
+        receiverId: bob.userId,
+        senderId: alice.userId,
+        myIk: bob.idn.ik,
+        msg: tamperedMsg,
+        getSpkPriv: (id) => getSpkPriv(bob.userId, id),
+        getOpkPriv: (id) => getOpkPriv(bob.userId, id),
+        deleteOpkPriv: (id) => deleteOpkPriv(bob.userId, id),
+        pinned: { ik: alice.idn.ik.pub, sik: alice.idn.sik.pub },
+      });
+    } catch (e) {
+      thrownError = e;
+    }
+
+    expect(thrownError).toBeInstanceOf(CryptoError);
+    expect(thrownError?.code).toBe(PEER_KEY_CHANGED);
+    expect(await loadSession(bob.userId, alice.userId)).toBeNull();
+  });
 });

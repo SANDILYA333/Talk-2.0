@@ -1147,4 +1147,121 @@ describe("S9: Double Ratchet", () => {
       saveSpy.mockRestore();
     }
   });
+
+  it("R1.1: an initial message with a corrupted tag leaves OPK intact and saves no session, legitimate message decrypts afterwards and consumes OPK", async () => {
+    const { getOpkPriv, deleteOpkPriv } = await import("../storage/keystore.js");
+    const alice = await mkUserKeyMaterial();
+    const bob = await mkUserKeyMaterial();
+    const bobBundle = bob.bundle(0);
+    const opkId = bobBundle.opk.id;
+
+    // Verify OPK exists in Bob's keystore initially
+    expect(await getOpkPriv(bob.userId, opkId)).not.toBeNull();
+
+    const { session: aliceSession, initialHeader } = await initiateRatchetSession({
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      mySik: alice.idn.sik,
+      bundle: bobBundle,
+      pinned: { ik: bob.idn.ik.pub, sik: bob.idn.sik.pub },
+    });
+
+    const legitMsg = await ratchetEncrypt({
+      session: aliceSession,
+      envelope: { t: "text", body: "secret hello", ts: 100 },
+      type: "text",
+      senderId: alice.userId,
+      receiverId: bob.userId,
+      myIk: alice.idn.ik,
+      initialHeader,
+    });
+
+    // 1. Create a tampered message with corrupted ciphertext/tag
+    const tamperedCt = fromB64(legitMsg.ciphertext);
+    tamperedCt[tamperedCt.length - 1] ^= 0x01; // flip last byte of tag
+    const tamperedMsg = { ...legitMsg, ciphertext: toB64(tamperedCt) };
+
+    // Attempt decrypt tamperedMsg - must fail
+    await expect(
+      ratchetDecrypt({
+        receiverId: bob.userId,
+        senderId: alice.userId,
+        myIk: bob.idn.ik,
+        msg: tamperedMsg,
+        getSpkPriv: (id) => getSpkPriv(bob.userId, id),
+        getOpkPriv: (id) => getOpkPriv(bob.userId, id),
+        deleteOpkPriv: (id) => deleteOpkPriv(bob.userId, id),
+        pinned: { ik: alice.idn.ik.pub, sik: alice.idn.sik.pub },
+      })
+    ).rejects.toThrow();
+
+    // CRITICAL: Bob's OPK private key MUST STILL BE INTACT!
+    const opkPrivAfterTamper = await getOpkPriv(bob.userId, opkId);
+    expect(opkPrivAfterTamper).not.toBeNull();
+
+    // And no session was saved
+    expect(await loadSession(bob.userId, alice.userId)).toBeNull();
+
+    // 2. Now decrypt the legitimate message — must succeed!
+    const { session: bobSession, envelope } = await ratchetDecrypt({
+      receiverId: bob.userId,
+      senderId: alice.userId,
+      myIk: bob.idn.ik,
+      msg: legitMsg,
+      getSpkPriv: (id) => getSpkPriv(bob.userId, id),
+      getOpkPriv: (id) => getOpkPriv(bob.userId, id),
+      deleteOpkPriv: (id) => deleteOpkPriv(bob.userId, id),
+      pinned: { ik: alice.idn.ik.pub, sik: alice.idn.sik.pub },
+    });
+    expect(envelope.body).toBe("secret hello");
+    expect(bobSession).toBeDefined();
+
+    // 3. A successful decrypt MUST delete the OPK
+    expect(await getOpkPriv(bob.userId, opkId)).toBeNull();
+  });
+
+  it("R1.1: a forged initial message with a valid opkId and a bad tag does not consume the OPK", async () => {
+    const { getOpkPriv, deleteOpkPriv } = await import("../storage/keystore.js");
+    const eve = await mkUserKeyMaterial();
+    const bob = await mkUserKeyMaterial();
+    const bobBundle = bob.bundle(0);
+    const opkId = bobBundle.opk.id;
+
+    // Eve crafts a forged initial message referencing Bob's valid opkId but with random/invalid ciphertext
+    const forgedHeader = {
+      sessionId: "forged-session-id-1234567890",
+      n: 0,
+      pn: 0,
+      dh: toB64(xPub(newSecret())),
+      ek: toB64(xPub(newSecret())),
+      spkId: bobBundle.spk.id,
+      opkId: opkId,
+      ik: toB64(eve.idn.ik.pub),
+      sik: toB64(eve.idn.sik.pub),
+    };
+    const forgedMsg = {
+      v: 2,
+      type: "text",
+      header: forgedHeader,
+      nonce: toB64(new Uint8Array(12).fill(0x42)),
+      ciphertext: toB64(new Uint8Array(272).fill(0x99)), // random/invalid tag
+    };
+
+    await expect(
+      ratchetDecrypt({
+        receiverId: bob.userId,
+        senderId: eve.userId,
+        myIk: bob.idn.ik,
+        msg: forgedMsg,
+        getSpkPriv: (id) => getSpkPriv(bob.userId, id),
+        getOpkPriv: (id) => getOpkPriv(bob.userId, id),
+        deleteOpkPriv: (id) => deleteOpkPriv(bob.userId, id),
+        pinned: { ik: eve.idn.ik.pub, sik: eve.idn.sik.pub },
+      })
+    ).rejects.toThrow();
+
+    // Bob's OPK MUST NOT be consumed by Eve's forged message
+    expect(await getOpkPriv(bob.userId, opkId)).not.toBeNull();
+  });
 });

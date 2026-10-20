@@ -336,6 +336,8 @@ export async function ratchetDecrypt({
   msg,
   getSpkPriv,
   takeOpkPriv,
+  getOpkPriv,
+  deleteOpkPriv,
   pinned,
 }) {
   if (msg?.v !== 2) throw new CryptoError(UNSUPPORTED_VERSION);
@@ -345,6 +347,7 @@ export async function ratchetDecrypt({
   }
 
   let activeSession = session;
+  let opkIdToConsume = null;
 
   // Initial handshake resolution
   if (!activeSession || (h.ek && h.sessionId !== activeSession.sessionId)) {
@@ -354,8 +357,13 @@ export async function ratchetDecrypt({
 
     let opkPriv = null;
     if (h.opkId !== null && h.opkId !== undefined) {
-      opkPriv = await takeOpkPriv(h.opkId);
+      if (getOpkPriv) {
+        opkPriv = await getOpkPriv(h.opkId);
+      } else if (takeOpkPriv) {
+        opkPriv = await takeOpkPriv(h.opkId);
+      }
       if (!opkPriv) throw new CryptoError(DECRYPT_FAILED);
+      opkIdToConsume = h.opkId;
     }
 
     const res = await respondRatchetSession({
@@ -487,7 +495,11 @@ export async function ratchetDecrypt({
   evictSkippedKeys(state);
   Object.assign(activeSession, state);
 
-  return { session: activeSession, envelope };
+  if (opkIdToConsume !== null && deleteOpkPriv) {
+    await deleteOpkPriv(opkIdToConsume);
+  }
+
+  return { session: activeSession, envelope, consumedOpkId: opkIdToConsume };
 }
 
 /**

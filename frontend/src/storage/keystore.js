@@ -129,6 +129,13 @@ export function takeOpkPriv(uid, id) {
   });
 }
 
+export function deleteOpkPriv(uid, id) {
+  return withLock(lockFor(uid), async () => {
+    if (!Number.isInteger(id)) return;
+    await del(K.opk(uid, id));
+  });
+}
+
 export async function countOpks(uid) {
   return (await keysWithPrefix(`opk:${uid}:`)).length;
 }

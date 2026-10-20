@@ -4,6 +4,8 @@ import { checkContact, readPin } from "./safety";
 import {
   loadIdentity,
   getSpkPriv,
+  getOpkPriv,
+  deleteOpkPriv,
   takeOpkPriv,
   getPlain,
   putPlain,
@@ -285,6 +287,7 @@ export async function readMessage({ me, msg }) {
           myIk: idn.ik,
           msg,
           getSpkPriv: (id) => getSpkPriv(me, id),
+          getOpkPriv: (id) => getOpkPriv(me, id),
           takeOpkPriv: (id) => takeOpkPriv(me, id),
           pinned: { ik: fromB64(pin.ik), sik: pin.sik ? fromB64(pin.sik) : null },
         });
@@ -308,11 +311,16 @@ export async function readMessage({ me, msg }) {
         }
       }
 
-      // Commit session state
+      // Commit session state first
       if (isLoserSession) {
         await saveLoserSession(me, msg.senderId, dec.session);
       } else {
         await saveSession(me, msg.senderId, dec.session);
+      }
+
+      // Then delete OPK private key
+      if (dec.consumedOpkId !== null && dec.consumedOpkId !== undefined) {
+        await deleteOpkPriv(me, dec.consumedOpkId);
       }
 
       await putPlain(me, msg._id, { t: env.t, body: env.body, ts: env.ts, att: env.att });

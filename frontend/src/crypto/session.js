@@ -6,7 +6,21 @@ import { x3dhInitiate, x3dhRespond } from "./x3dh.js";
 import { buildAadV2, aeadEncrypt, aeadDecrypt } from "./aead.js";
 import { pad, unpad, MAX_TEXT_CHARS } from "./v1.js";
 import { verifyBundle } from "./keys.js";
-import { CryptoError } from "./errors.js";
+import {
+  CryptoError,
+  PEER_NO_KEYS,
+  SESSION_SETUP_FAILED,
+  PEER_KEY_CHANGED,
+  DECRYPT_FAILED,
+  DUPLICATE_MESSAGE,
+  TOO_MANY_SKIPPED,
+  SESSION_RESET_REQUIRED,
+  HISTORY_UNAVAILABLE,
+  LOCAL_KEYS_MISSING,
+  STORAGE_UNAVAILABLE,
+  UNSUPPORTED_VERSION,
+  MEDIA_DECRYPT_FAILED,
+} from "./errors.js";
 
 export const INFO_SESSION = "talk/x3dh/v2/session";
 export const INFO_CHAIN_SEND = "talk/v2/chain/init-send";
@@ -30,7 +44,7 @@ export function kdfCk(ck) {
  */
 export async function initiateSession({ senderId, receiverId, myIk, mySik, bundle, pinned }) {
   const check = verifyBundle(bundle, pinned);
-  if (!check.ok) throw new CryptoError(check.reason);
+  if (!check.ok) throw new CryptoError(check.reason === "key-changed" ? PEER_KEY_CHANGED : SESSION_SETUP_FAILED);
 
   const ekPriv = newSecret();
   const ekPub = xPub(ekPriv);
@@ -82,16 +96,16 @@ export async function initiateSession({ senderId, receiverId, myIk, mySik, bundl
  * Responder creates a matching v2 session from initial header and local prekeys.
  */
 export async function respondSession({ receiverId, senderId, myIk, spkPriv, opkPriv, header, pinned }) {
-  if (!spkPriv || spkPriv.length !== 32) throw new CryptoError("undecryptable");
+  if (!spkPriv || spkPriv.length !== 32) throw new CryptoError(DECRYPT_FAILED);
   if (header.opkId !== null && header.opkId !== undefined) {
-    if (!opkPriv || opkPriv.length !== 32) throw new CryptoError("undecryptable");
+    if (!opkPriv || opkPriv.length !== 32) throw new CryptoError(DECRYPT_FAILED);
   }
 
   const ekPubA = fromB64(header.ek);
-  if (ekPubA.length !== 32) throw new CryptoError("tampered");
+  if (ekPubA.length !== 32) throw new CryptoError(DECRYPT_FAILED);
 
   const ikPubA = header.ik ? fromB64(header.ik) : (pinned?.ik ? (typeof pinned.ik === "string" ? fromB64(pinned.ik) : pinned.ik) : null);
-  if (!ikPubA || ikPubA.length !== 32) throw new CryptoError("tampered");
+  if (!ikPubA || ikPubA.length !== 32) throw new CryptoError(DECRYPT_FAILED);
 
   if (pinned?.ik) {
     const pinnedIk = typeof pinned.ik === "string" ? fromB64(pinned.ik) : pinned.ik;
@@ -99,7 +113,7 @@ export async function respondSession({ receiverId, senderId, myIk, spkPriv, opkP
     for (let i = 0; i < 32; i++) {
       if (pinnedIk[i] !== ikPubA[i]) { match = false; break; }
     }
-    if (!match) throw new CryptoError("key-changed");
+    if (!match) throw new CryptoError(PEER_KEY_CHANGED);
   }
 
   const sk = x3dhRespond({
@@ -190,10 +204,10 @@ export async function decryptSessionMessage({
   takeOpkPriv,
   pinned,
 }) {
-  if (msg?.v !== 2) throw new CryptoError("unsupported-version");
+  if (msg?.v !== 2) throw new CryptoError(UNSUPPORTED_VERSION);
   const h = msg.header;
   if (!h || typeof h !== "object" || typeof h.sessionId !== "string") {
-    throw new CryptoError("tampered");
+    throw new CryptoError(DECRYPT_FAILED);
   }
 
   let activeSession = session;
@@ -201,14 +215,14 @@ export async function decryptSessionMessage({
   // If there is no active session, or if the incoming message has initial handshake fields
   // for a DIFFERENT session ID, establish the new session from the initial message
   if (!activeSession || (h.ek && h.sessionId !== activeSession.sessionId)) {
-    if (!h.ek || !h.spkId) throw new CryptoError("undecryptable");
+    if (!h.ek || !h.spkId) throw new CryptoError(DECRYPT_FAILED);
     const spkPriv = await getSpkPriv(h.spkId);
-    if (!spkPriv) throw new CryptoError("undecryptable");
+    if (!spkPriv) throw new CryptoError(DECRYPT_FAILED);
 
     let opkPriv = null;
     if (h.opkId !== null && h.opkId !== undefined) {
       opkPriv = await takeOpkPriv(h.opkId);
-      if (!opkPriv) throw new CryptoError("undecryptable");
+      if (!opkPriv) throw new CryptoError(DECRYPT_FAILED);
     }
 
     const res = await respondSession({
@@ -222,11 +236,11 @@ export async function decryptSessionMessage({
     });
     activeSession = res.session;
   } else if (activeSession && h.sessionId !== activeSession.sessionId) {
-    throw new CryptoError("tampered");
+    throw new CryptoError(DECRYPT_FAILED);
   }
 
   const n = h.n;
-  if (!Number.isInteger(n) || n < 0) throw new CryptoError("tampered");
+  if (!Number.isInteger(n) || n < 0) throw new CryptoError(DECRYPT_FAILED);
 
   let mk;
   let nextRecvCounter = activeSession.recvCounter;
@@ -241,7 +255,7 @@ export async function decryptSessionMessage({
     nextRecvCounter = activeSession.recvCounter + 1;
   } else if (n > activeSession.recvCounter) {
     if (n - activeSession.recvCounter > MAX_SKIP) {
-      throw new CryptoError("out-of-order-window-exceeded");
+      throw new CryptoError(TOO_MANY_SKIPPED);
     }
     let curCk = activeSession.chainKeyRecv;
     const skipped = { ...(activeSession.skippedKeys || {}) };
@@ -258,7 +272,7 @@ export async function decryptSessionMessage({
   } else {
     // n < activeSession.recvCounter
     if (!activeSession.skippedKeys || !activeSession.skippedKeys[n]) {
-      throw new CryptoError("duplicate-message");
+      throw new CryptoError(DUPLICATE_MESSAGE);
     }
     mk = fromB64(activeSession.skippedKeys[n].key);
     consumeSkipped = n;
@@ -278,7 +292,7 @@ export async function decryptSessionMessage({
   const plain = unpad(await aeadDecrypt(mk, fromB64(msg.nonce), fromB64(msg.ciphertext), aad));
   const envelope = JSON.parse(fromUtf8(plain));
   if (typeof envelope?.t !== "string" || typeof envelope?.ts !== "number") {
-    throw new CryptoError("tampered");
+    throw new CryptoError(DECRYPT_FAILED);
   }
 
   // Atomically advance state only AFTER successful AEAD decryption

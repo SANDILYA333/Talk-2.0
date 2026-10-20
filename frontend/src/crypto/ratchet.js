@@ -7,7 +7,21 @@ import { x3dhInitiate, x3dhRespond } from "./x3dh.js";
 import { aeadEncrypt, aeadDecrypt, u32be, TYPE } from "./aead.js";
 import { pad, unpad, MAX_TEXT_CHARS } from "./v1.js";
 import { verifyBundle } from "./keys.js";
-import { CryptoError } from "./errors.js";
+import {
+  CryptoError,
+  PEER_NO_KEYS,
+  SESSION_SETUP_FAILED,
+  PEER_KEY_CHANGED,
+  DECRYPT_FAILED,
+  DUPLICATE_MESSAGE,
+  TOO_MANY_SKIPPED,
+  SESSION_RESET_REQUIRED,
+  HISTORY_UNAVAILABLE,
+  LOCAL_KEYS_MISSING,
+  STORAGE_UNAVAILABLE,
+  UNSUPPORTED_VERSION,
+  MEDIA_DECRYPT_FAILED,
+} from "./errors.js";
 
 export const INFO_SESSION = "talk/x3dh/v2/session";
 export const INFO_ROOT = utf8("talk/v2/ratchet/root");
@@ -129,7 +143,7 @@ export function evictSkippedKeys(session, now = Date.now()) {
  */
 export async function initiateRatchetSession({ senderId, receiverId, myIk, mySik, bundle, pinned }) {
   const check = verifyBundle(bundle, pinned);
-  if (!check.ok) throw new CryptoError(check.reason);
+  if (!check.ok) throw new CryptoError(check.reason === "key-changed" ? PEER_KEY_CHANGED : SESSION_SETUP_FAILED);
 
   const ekPriv = newSecret();
   const ekPub = xPub(ekPriv);
@@ -192,16 +206,16 @@ export async function initiateRatchetSession({ senderId, receiverId, myIk, mySik
  * Responder creates a Double Ratchet session from initial header and local prekeys.
  */
 export async function respondRatchetSession({ receiverId, senderId, myIk, spkPriv, opkPriv, header, pinned }) {
-  if (!spkPriv || spkPriv.length !== 32) throw new CryptoError("undecryptable");
+  if (!spkPriv || spkPriv.length !== 32) throw new CryptoError(DECRYPT_FAILED);
   if (header.opkId !== null && header.opkId !== undefined) {
-    if (!opkPriv || opkPriv.length !== 32) throw new CryptoError("undecryptable");
+    if (!opkPriv || opkPriv.length !== 32) throw new CryptoError(DECRYPT_FAILED);
   }
 
   const ekPubA = fromB64(header.ek);
-  if (ekPubA.length !== 32) throw new CryptoError("tampered");
+  if (ekPubA.length !== 32) throw new CryptoError(DECRYPT_FAILED);
 
   const ikPubA = header.ik ? fromB64(header.ik) : (pinned?.ik ? (typeof pinned.ik === "string" ? fromB64(pinned.ik) : pinned.ik) : null);
-  if (!ikPubA || ikPubA.length !== 32) throw new CryptoError("tampered");
+  if (!ikPubA || ikPubA.length !== 32) throw new CryptoError(DECRYPT_FAILED);
 
   if (pinned?.ik) {
     const pinnedIk = typeof pinned.ik === "string" ? fromB64(pinned.ik) : pinned.ik;
@@ -209,7 +223,7 @@ export async function respondRatchetSession({ receiverId, senderId, myIk, spkPri
     for (let i = 0; i < 32; i++) {
       if (pinnedIk[i] !== ikPubA[i]) { match = false; break; }
     }
-    if (!match) throw new CryptoError("key-changed");
+    if (!match) throw new CryptoError(PEER_KEY_CHANGED);
   }
 
   const sk = x3dhRespond({
@@ -259,7 +273,7 @@ export async function ratchetEncrypt({ session, envelope, type = "text", senderI
   // If sending chain key is null, Bob or Alice needs to run DH ratchet step before sending
   if (!session.cks) {
     if (!session.dhr) {
-      throw new CryptoError("session-setup-failed");
+      throw new CryptoError(SESSION_SETUP_FAILED);
     }
     const nextDhPriv = newSecret();
     const nextDhPub = xPub(nextDhPriv);
@@ -324,24 +338,24 @@ export async function ratchetDecrypt({
   takeOpkPriv,
   pinned,
 }) {
-  if (msg?.v !== 2) throw new CryptoError("unsupported-version");
+  if (msg?.v !== 2) throw new CryptoError(UNSUPPORTED_VERSION);
   const h = msg.header;
   if (!h || typeof h !== "object" || typeof h.sessionId !== "string") {
-    throw new CryptoError("tampered");
+    throw new CryptoError(DECRYPT_FAILED);
   }
 
   let activeSession = session;
 
   // Initial handshake resolution
   if (!activeSession || (h.ek && h.sessionId !== activeSession.sessionId)) {
-    if (!h.ek || !h.spkId) throw new CryptoError("undecryptable");
+    if (!h.ek || !h.spkId) throw new CryptoError(DECRYPT_FAILED);
     const spkPriv = await getSpkPriv(h.spkId);
-    if (!spkPriv) throw new CryptoError("undecryptable");
+    if (!spkPriv) throw new CryptoError(DECRYPT_FAILED);
 
     let opkPriv = null;
     if (h.opkId !== null && h.opkId !== undefined) {
       opkPriv = await takeOpkPriv(h.opkId);
-      if (!opkPriv) throw new CryptoError("undecryptable");
+      if (!opkPriv) throw new CryptoError(DECRYPT_FAILED);
     }
 
     const res = await respondRatchetSession({
@@ -355,14 +369,14 @@ export async function ratchetDecrypt({
     });
     activeSession = res.session;
   } else if (activeSession && h.sessionId !== activeSession.sessionId) {
-    throw new CryptoError("tampered");
+    throw new CryptoError(DECRYPT_FAILED);
   }
 
   const n = h.n;
   const pn = h.pn ?? 0;
   const dhHeader = h.dh;
   if (!Number.isInteger(n) || n < 0 || typeof dhHeader !== "string") {
-    throw new CryptoError("tampered");
+    throw new CryptoError(DECRYPT_FAILED);
   }
 
   // ATOMICITY: clone session
@@ -380,10 +394,10 @@ export async function ratchetDecrypt({
       // Skip unreceived messages in the previous receiving chain up to header.pn
       if (state.ckr !== null) {
         if (pn < state.nr) {
-          throw new CryptoError("tampered");
+          throw new CryptoError(DECRYPT_FAILED);
         }
         if (pn - state.nr > MAX_SKIP) {
-          throw new CryptoError("out-of-order-window-exceeded");
+          throw new CryptoError(TOO_MANY_SKIPPED);
         }
         let curCk = state.ckr;
         for (let i = state.nr; i < pn; i++) {
@@ -419,10 +433,10 @@ export async function ratchetDecrypt({
 
     // 3. Skip unreceived messages in the current receiving chain up to header.n
     if (n < state.nr) {
-      throw new CryptoError("duplicate-message");
+      throw new CryptoError(DUPLICATE_MESSAGE);
     }
     if (n - state.nr > MAX_SKIP) {
-      throw new CryptoError("out-of-order-window-exceeded");
+      throw new CryptoError(TOO_MANY_SKIPPED);
     }
 
     let curCk = state.ckr;
@@ -466,7 +480,7 @@ export async function ratchetDecrypt({
 
   const envelope = JSON.parse(fromUtf8(plain));
   if (typeof envelope?.t !== "string" || typeof envelope?.ts !== "number") {
-    throw new CryptoError("tampered");
+    throw new CryptoError(DECRYPT_FAILED);
   }
 
   // 5. Evict skipped keys & commit state

@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { set } from "idb-keyval";
 import nacl from "tweetnacl";
+import { PEER_KEY_CHANGED } from "../crypto/errors.js";
 
 const mockSocket = {
   handlers: {},
@@ -40,6 +41,17 @@ import { syncOpks } from "../lib/keyApi.js";
 let n = 0;
 const uid = () => (++n).toString(16).padStart(24, "0");
 const b64 = (u) => Buffer.from(u).toString("base64");
+
+async function waitFor(fn, timeout = 2000, interval = 15) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      if (fn()) return;
+    } catch {}
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  fn();
+}
 
 const userOpkMap = {};
 
@@ -336,7 +348,7 @@ describe("S8 Integration & Store Sessions", () => {
     useChatStore.getState().listenForMessages();
 
     mockSocket.emit("newMessage", sentMedia);
-    await new Promise((r) => setTimeout(r, 60));
+    await waitFor(() => useChatStore.getState().messages.length === 1);
 
     const bMsgs = useChatStore.getState().messages;
     expect(bMsgs.length).toBe(1);
@@ -414,7 +426,7 @@ describe("S8 Integration & Store Sessions", () => {
     const msgs = useChatStore.getState().messages;
     expect(msgs.length).toBe(2);
     expect(msgs[1].state).toBe("failed");
-    expect(msgs[1].failReason).toBe("key-changed");
+    expect(msgs[1].failReason).toBe(PEER_KEY_CHANGED);
   });
 });
 

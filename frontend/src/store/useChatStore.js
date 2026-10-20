@@ -11,8 +11,16 @@ import { blobStore } from "../lib/blobStore";
 import { putPlain } from "../storage/keystore";
 import { sortConversations } from "../lib/conversationView";
 
+import {
+  normalizeErrorCode,
+  PEER_KEY_CHANGED,
+  DECRYPT_FAILED,
+  SESSION_SETUP_FAILED,
+  PEER_NO_KEYS,
+} from "../crypto/errors.js";
+
 const meId = () => useAuthStore.getState().authUser?._id;
-const RETRYABLE = new Set(["key-changed", "waiting-for-key", "undecryptable", "tampered"]);
+const RETRYABLE = new Set([PEER_KEY_CHANGED, DECRYPT_FAILED, SESSION_SETUP_FAILED, "waiting-for-key", "key-changed", "undecryptable", "tampered"]);
 const mediaUploadContexts = new Map(); // cid -> { file, caption, previewUrl, abortController, processed, key, nonce, ciphertext, blobId, uploadedUrl, att }
 
 const DEBOUNCE_DELAY = typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 30 : 300;
@@ -350,7 +358,8 @@ export const useChatStore = create(
 
           get().getConversations();
         } catch (e) {
-          patch({ state: "failed", failReason: e.code ?? e.response?.data?.message ?? e.message ?? "network" });
+          const failReason = normalizeErrorCode(e.code ?? e.response?.data?.message ?? e.message ?? "network");
+          patch({ state: "failed", failReason });
         }
       },
 
@@ -553,16 +562,16 @@ export const useChatStore = create(
             failReason = "too-big";
           } else if (msg.includes("unsupported") || msg.includes("mismatch") || msg.includes("Magic byte")) {
             failReason = "unsupported-type";
-          } else if (e.code === "recipient-no-keys" || msg.includes("prekey")) {
-            failReason = "recipient-no-keys";
-          } else if (e.code === "key-changed" || msg.includes("identity")) {
-            failReason = "key-changed";
-          } else if (e.response?.data?.message) {
-            failReason = e.response.data.message;
+          } else if (e.code === PEER_NO_KEYS || e.code === "recipient-no-keys" || msg.includes("prekey")) {
+            failReason = PEER_NO_KEYS;
+          } else if (e.code === PEER_KEY_CHANGED || e.code === "key-changed" || msg.includes("identity")) {
+            failReason = PEER_KEY_CHANGED;
           } else if (e.code) {
-            failReason = e.code;
+            failReason = normalizeErrorCode(e.code);
+          } else if (e.response?.data?.message) {
+            failReason = normalizeErrorCode(e.response.data.message);
           } else if (msg) {
-            failReason = msg;
+            failReason = normalizeErrorCode(msg);
           }
           patch({ state: "failed", failReason });
         }

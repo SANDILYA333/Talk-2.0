@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { set } from "idb-keyval";
 import nacl from "tweetnacl";
+import { PEER_NO_KEYS, PEER_KEY_CHANGED } from "../crypto/errors.js";
 
 const mockSocket = {
   handlers: {},
@@ -182,7 +183,7 @@ describe("useChatStore E2EE", () => {
     expect(ax.post).not.toHaveBeenCalled();
     const item = useChatStore.getState().messages[0];
     expect(item.state).toBe("failed");
-    expect(item.failReason).toBe("recipient-no-keys");
+    expect(item.failReason).toBe(PEER_NO_KEYS);
   });
 
   it("newMessage socket event: decrypted into messages when it is the active chat; the same _id delivered twice appears once", async () => {
@@ -289,7 +290,7 @@ describe("useChatStore E2EE", () => {
 
     const item2 = useChatStore.getState().messages.find((m) => m._id === m2._id);
     expect(item2).toBeDefined();
-    expect(item2.state).toBe("key-changed");
+    expect(item2.state).toBe(PEER_KEY_CHANGED);
     expect(item2.raw).toBeDefined();
 
     const cur = await keysOf(peerId);

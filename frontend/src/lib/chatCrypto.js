@@ -28,6 +28,20 @@ import {
   fromB64,
   toB64,
   CryptoError,
+  SendError,
+  normalizeErrorCode,
+  PEER_NO_KEYS,
+  SESSION_SETUP_FAILED,
+  PEER_KEY_CHANGED,
+  DECRYPT_FAILED,
+  DUPLICATE_MESSAGE,
+  TOO_MANY_SKIPPED,
+  SESSION_RESET_REQUIRED,
+  HISTORY_UNAVAILABLE,
+  LOCAL_KEYS_MISSING,
+  STORAGE_UNAVAILABLE,
+  UNSUPPORTED_VERSION,
+  MEDIA_DECRYPT_FAILED,
 } from "../crypto/index.js";
 import { decryptBlob } from "./mediaCrypto.js";
 import { blobStore } from "./blobStore.js";
@@ -41,9 +55,7 @@ const MAX_MEDIA_CACHE = 40;
 
 export const clearBundleCache = (peerId) => (peerId ? bundleCache.delete(peerId) : bundleCache.clear());
 
-export class SendError extends Error {
-  constructor(code) { super(code); this.code = code; }
-}
+export { SendError };
 
 async function cachedBundle(peerId, { opk = false } = {}) {
   const hit = bundleCache.get(peerId);
@@ -56,15 +68,15 @@ async function cachedBundle(peerId, { opk = false } = {}) {
   } catch (e) {
     const status = e.response?.status;
     const msg = e.response?.data?.message;
-    if (status === 404 || msg === "recipient-no-keys") throw new SendError("recipient-no-keys");
-    if (msg === "recipient-keys-stale") throw new SendError("recipient-keys-stale");
-    throw new SendError(e.message === "bad-bundle" ? "bad-bundle" : "network");
+    if (status === 404 || msg === "recipient-no-keys") throw new SendError(PEER_NO_KEYS);
+    if (msg === "recipient-keys-stale") throw new SendError(SESSION_SETUP_FAILED);
+    throw new SendError(e.message === "bad-bundle" ? SESSION_SETUP_FAILED : "network");
   }
 }
 
 export async function encryptEnvelope({ me, peerId, type = "text", envelope }) {
   const idn = await loadIdentity(me);
-  if (!idn) throw new SendError("no-identity");
+  if (!idn) throw new SendError(LOCAL_KEYS_MISSING);
 
   return withSessionLock(me, peerId, async () => {
     let session = await loadSession(me, peerId);
@@ -77,7 +89,7 @@ export async function encryptEnvelope({ me, peerId, type = "text", envelope }) {
       const trust = await checkContact(me, peerId, cur);
       if (trust.status === "changed") {
         clearBundleCache(peerId);
-        throw new SendError("key-changed");
+        throw new SendError(PEER_KEY_CHANGED);
       }
       const pinned = { ik: bundle.ikPub, sik: bundle.sikPub };
 
@@ -100,10 +112,10 @@ export async function encryptEnvelope({ me, peerId, type = "text", envelope }) {
       // Verify pinned identity has not changed
       const pin = await readPin(me, peerId);
       if (pin && session.peerIk && pin.ik !== session.peerIk) {
-        throw new SendError("key-changed");
+        throw new SendError(PEER_KEY_CHANGED);
       }
       if (pin && session.peerSik && pin.sik && pin.sik !== session.peerSik) {
-        throw new SendError("key-changed");
+        throw new SendError(PEER_KEY_CHANGED);
       }
       if (!session.rk || !session.dhs) {
         session = upgradeFromS8Session(session);
@@ -187,11 +199,11 @@ export async function readMessage({ me, msg }) {
     };
   }
 
-  if (msg.senderId === me) return { state: "undecryptable" };
-  if (msg.v !== 1 && msg.v !== 2) return { state: "unsupported-version" };
+  if (msg.senderId === me) return { state: DECRYPT_FAILED };
+  if (msg.v !== 1 && msg.v !== 2) return { state: UNSUPPORTED_VERSION };
 
   const idn = await loadIdentity(me);
-  if (!idn) return { state: "undecryptable" };
+  if (!idn) return { state: LOCAL_KEYS_MISSING };
 
   let pin = await readPin(me, msg.senderId);
   if (!pin) {
@@ -209,7 +221,7 @@ export async function readMessage({ me, msg }) {
 
       if (env.t === "media") {
         if (!validateAttachment(env.att, blobStore.getEndpoint())) {
-          return { state: "tampered" };
+          return { state: MEDIA_DECRYPT_FAILED };
         }
       }
 
@@ -222,10 +234,11 @@ export async function readMessage({ me, msg }) {
         att: toSafeAtt(env.att),
       };
     } catch (e) {
-      const code = e instanceof CryptoError ? e.code : "tampered";
-      if (code === "tampered") {
+      let code = e instanceof CryptoError ? e.code : DECRYPT_FAILED;
+      code = normalizeErrorCode(code);
+      if (code === DECRYPT_FAILED) {
         const cur = await currentKeys(msg.senderId).catch(() => null);
-        if (cur && (cur.ik !== pin.ik || (pin.sik && cur.sik && cur.sik !== pin.sik))) return { state: "key-changed" };
+        if (cur && (cur.ik !== pin.ik || (pin.sik && cur.sik && cur.sik !== pin.sik))) return { state: PEER_KEY_CHANGED };
       }
       return { state: code };
     }
@@ -291,7 +304,7 @@ export async function readMessage({ me, msg }) {
       const env = dec.envelope;
       if (env.t === "media") {
         if (!validateAttachment(env.att, blobStore.getEndpoint())) {
-          return { state: "tampered" };
+          return { state: MEDIA_DECRYPT_FAILED };
         }
       }
 
@@ -311,10 +324,11 @@ export async function readMessage({ me, msg }) {
         att: toSafeAtt(env.att),
       };
     } catch (e) {
-      const code = e instanceof CryptoError ? e.code : "tampered";
-      if (code === "tampered") {
+      let code = e instanceof CryptoError ? e.code : DECRYPT_FAILED;
+      code = normalizeErrorCode(code);
+      if (code === DECRYPT_FAILED) {
         const cur = await currentKeys(msg.senderId).catch(() => null);
-        if (cur && (cur.ik !== pin.ik || (pin.sik && cur.sik && cur.sik !== pin.sik))) return { state: "key-changed" };
+        if (cur && (cur.ik !== pin.ik || (pin.sik && cur.sik && cur.sik !== pin.sik))) return { state: PEER_KEY_CHANGED };
       }
       return { state: code };
     }
@@ -330,8 +344,7 @@ export async function loadMedia(me, messageId) {
 
   const hit = await getPlain(me, messageId);
   if (!hit || !hit.att || !hit.att.key || !hit.att.nonce || !hit.att.url) {
-    const err = new Error("Can't open this attachment on this device");
-    err.code = "no-key";
+    const err = new CryptoError(MEDIA_DECRYPT_FAILED, "Can't open this attachment on this device");
     throw err;
   }
 
@@ -341,12 +354,17 @@ export async function loadMedia(me, messageId) {
 
   const ciphertext = await blobStore.fetch(att.url, { maxBytes: att.size + 16 });
 
-  const plainBytes = await decryptBlob({
-    ciphertext,
-    key: keyBytes,
-    nonce: nonceBytes,
-    declaredSize: att.size,
-  });
+  let plainBytes;
+  try {
+    plainBytes = await decryptBlob({
+      ciphertext,
+      key: keyBytes,
+      nonce: nonceBytes,
+      declaredSize: att.size,
+    });
+  } catch {
+    throw new CryptoError(MEDIA_DECRYPT_FAILED, "Attachment decryption failed");
+  }
 
   const blob = new Blob([plainBytes], { type: att.mime });
   const objectUrl = URL.createObjectURL(blob);

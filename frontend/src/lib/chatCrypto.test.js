@@ -9,6 +9,7 @@ import { encryptText, readMessage, snippetFor, clearBundleCache } from "./chatCr
 import { readPin, acceptKeyChange } from "./safety.js";
 import { upgradeIdentity, ensureSpk, loadIdentity, putPlain, getPlain, delPlain, wipeKeyMaterial, deleteSession } from "../storage/keystore.js";
 import { signIkBinding, toB64, fromB64, encryptV1 } from "../crypto/index.js";
+import { PEER_KEY_CHANGED, DECRYPT_FAILED, UNSUPPORTED_VERSION, PEER_NO_KEYS, SESSION_SETUP_FAILED } from "../crypto/errors.js";
 
 let n = 0;
 const uid = () => (++n).toString(16).padStart(24, "0");
@@ -104,7 +105,7 @@ describe("encryptText", () => {
   it("recipient without keys", async () => {
     const A = await mkUser(), B = await mkUser();
     down.bundle.add(B);
-    await expect(encryptText({ me: A, peerId: B, text: "x" })).rejects.toMatchObject({ code: "recipient-no-keys" });
+    await expect(encryptText({ me: A, peerId: B, text: "x" })).rejects.toMatchObject({ code: PEER_NO_KEYS });
   });
   it("blocks sending when the peer's keys changed since pinning", async () => {
     const A = await mkUser(), B = await mkUser();
@@ -112,7 +113,7 @@ describe("encryptText", () => {
     await resetUser(B);
     clearBundleCache();
     await deleteSession(A, B);
-    await expect(encryptText({ me: A, peerId: B, text: "y" })).rejects.toMatchObject({ code: "key-changed" });
+    await expect(encryptText({ me: A, peerId: B, text: "y" })).rejects.toMatchObject({ code: PEER_KEY_CHANGED });
   });
   it("refuses a bundle with a bad signature", async () => {
     const A = await mkUser(), B = await mkUser();
@@ -121,7 +122,7 @@ describe("encryptText", () => {
       b.spk.sig = toB64(new Uint8Array(64));
       return { data: b };
     });
-    await expect(encryptText({ me: A, peerId: B, text: "x" })).rejects.toMatchObject({ code: "bad-spk-sig" });
+    await expect(encryptText({ me: A, peerId: B, text: "x" })).rejects.toMatchObject({ code: SESSION_SETUP_FAILED });
   });
   it("rejects over-long text", async () => {
     const A = await mkUser(), B = await mkUser();
@@ -167,7 +168,7 @@ describe("readMessage", () => {
   });
   it("own message: undecryptable without cache, ok with cache", async () => {
     const { A, B, msg } = await flow("mine");
-    expect((await readMessage({ me: A, msg })).state).toBe("undecryptable");
+    expect((await readMessage({ me: A, msg })).state).toBe(DECRYPT_FAILED);
     await putPlain(A, msg._id, { t: "text", body: "mine", ts: 1 });
     expect(await readMessage({ me: A, msg })).toMatchObject({ state: "ok", text: "mine" });
     void B;
@@ -175,7 +176,7 @@ describe("readMessage", () => {
   it("tampered ciphertext: state tampered, nothing cached", async () => {
     const { B, msg } = await flow();
     const r = await readMessage({ me: B, msg: { ...msg, ciphertext: flip(msg.ciphertext) } });
-    expect(r.state).toBe("tampered");
+    expect(r.state).toBe(DECRYPT_FAILED);
     expect(await getPlain(B, msg._id)).toBeNull();
   });
   it("first contact pins the sender (one fetch even for concurrent reads)", async () => {
@@ -197,13 +198,13 @@ describe("readMessage", () => {
   it("unsupported version never touches the network", async () => {
     const { B, msg } = await flow();
     ax.get.mockClear();
-    expect((await readMessage({ me: B, msg: { ...msg, v: 3 } })).state).toBe("unsupported-version");
+    expect((await readMessage({ me: B, msg: { ...msg, v: 3 } })).state).toBe(UNSUPPORTED_VERSION);
     expect(ax.get).not.toHaveBeenCalled();
   });
   it("undecryptable when the SPK is gone and nothing is cached", async () => {
     const { B, msg } = await flow();
     await wipeKeyMaterial(B);
-    expect((await readMessage({ me: B, msg })).state).toBe("undecryptable");
+    expect((await readMessage({ me: B, msg })).state).toBe(DECRYPT_FAILED);
   });
   it("sender reset: key-changed, then ok after the user accepts", async () => {
     const A = await mkUser(), B = await mkUser();
@@ -212,7 +213,7 @@ describe("readMessage", () => {
     await resetUser(A);
     clearBundleCache();
     const m2 = wire(A, B, (await encryptText({ me: A, peerId: B, text: "after" })).payload);
-    expect((await readMessage({ me: B, msg: m2 })).state).toBe("key-changed");
+    expect((await readMessage({ me: B, msg: m2 })).state).toBe(PEER_KEY_CHANGED);
     const cur = await keysOf(A);
     await acceptKeyChange(B, A, { ik: cur.publicKey, sik: cur.sik });
     expect(await readMessage({ me: B, msg: m2 })).toMatchObject({ state: "ok", text: "after" });

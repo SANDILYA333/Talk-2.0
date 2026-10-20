@@ -496,6 +496,7 @@ export async function ratchetDecrypt({
 
   // 5. Evict skipped keys & commit state
   evictSkippedKeys(state);
+  state.state = "established";
   Object.assign(activeSession, state);
 
   if (opkIdToConsume !== null && deleteOpkPriv) {

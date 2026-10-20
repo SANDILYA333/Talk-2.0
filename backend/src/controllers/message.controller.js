@@ -337,10 +337,13 @@ export const sendMessage = async (req, res) => {
 
     const [recipient, bundle] = await Promise.all([
       User.exists({ _id: receiverId }),
-      KeyBundle.exists({ userId: receiverId }),
+      KeyBundle.findOne({ userId: receiverId }).select("protoMax"),
     ]);
     if (!recipient) return res.status(404).json({ message: "user-not-found" });
     if (!bundle) return res.status(409).json({ message: "recipient-no-keys" });
+    if (parsed.doc.v === 1 && (bundle.protoMax ?? 1) >= 2) {
+      return res.status(400).json({ message: "unsupported-version" });
+    }
 
     let doc, created = true;
     try {

@@ -174,7 +174,7 @@ function fetchAndPin(me, senderId) {
       if (!check.ok) {
         throw new CryptoError(SESSION_SETUP_FAILED, "bad-bundle-signature");
       }
-      const cur = { ik: toB64(bundle.ikPub), sik: toB64(bundle.sikPub) };
+      const cur = { ik: toB64(bundle.ikPub), sik: toB64(bundle.sikPub), protoMax: bundle.protoMax ?? 1 };
       await checkContact(me, senderId, cur);
       return readPin(me, senderId);
     })().finally(() => pinInflight.delete(senderId));
@@ -226,6 +226,12 @@ export async function readMessage({ me, msg }) {
   }
 
   if (msg.v === 1) {
+    const existingSession = await loadSession(me, msg.senderId);
+    const isEstablished = existingSession && (existingSession.state === "established" || existingSession.rk);
+    if (isEstablished || (pin?.protoMax && pin.protoMax >= 2)) {
+      return { state: UNSUPPORTED_VERSION };
+    }
+
     try {
       const env = await decryptV1({
         msg, senderId: msg.senderId, receiverId: me, myIk: idn.ik,

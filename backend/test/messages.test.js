@@ -13,13 +13,14 @@ const RUN = `t_s5_${Date.now()}`;
 let n = 0;
 const b64 = (u) => Buffer.from(u).toString("base64");
 
-async function mkUser({ keys = true } = {}) {
+async function mkUser({ keys = true, protoMax = 1 } = {}) {
   const k = ++n;
   const user = await User.create({ clerkId: `${RUN}_${k}`, email: `${RUN}_${k}@test.local`, fullName: `T${k}`, profilePic: "" });
   if (keys) {
     await KeyBundle.create({
       userId: user._id, sik: b64(randomBytes(32)), ikBinding: b64(randomBytes(64)),
       spk: { id: 1, pub: b64(randomBytes(32)), sig: b64(randomBytes(64)) },
+      protoMax,
     });
   }
   return user;
@@ -147,6 +148,13 @@ describe("sendMessage: validation", () => {
     const r = await send(a, c, good());
     expect(r.status).toBe(409);
     expect(r.json.message).toBe("recipient-no-keys");
+    expect(emitToUser).not.toHaveBeenCalled();
+  });
+  it("rejects v:1 with 400 unsupported-version when recipient protoMax >= 2", async () => {
+    const a = await mkUser(), b = await mkUser({ protoMax: 2 });
+    const r = await send(a, b, good({ v: 1 }));
+    expect(r.status).toBe(400);
+    expect(r.json.message).toBe("unsupported-version");
     expect(emitToUser).not.toHaveBeenCalled();
   });
 });

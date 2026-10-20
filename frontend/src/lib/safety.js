@@ -29,36 +29,46 @@ export async function safetyNumber(mine, theirs) {
 
 const k = (me, peer) => `contact:${me}:${peer}`;
 
-// cur: { ik, sik } from the server. status: "new" | "ok" | "changed" | "no-keys"
+// cur: { ik, sik, protoMax } from the server. status: "new" | "ok" | "changed" | "no-keys"
 export async function checkContact(me, peer, cur) {
   if (!cur?.sik) return { status: "no-keys", verified: false, peerKeys: cur };
   const rec = await get(k(me, peer));
+  const protoMax = cur.protoMax ?? rec?.protoMax ?? 1;
   if (!rec) {
-    await set(k(me, peer), { ik: cur.ik, sik: cur.sik, verified: false });
+    await set(k(me, peer), { ik: cur.ik, sik: cur.sik, protoMax, verified: false });
     return { status: "new", verified: false, peerKeys: cur };
   }
   const oldIk = rec.ik ?? rec.key; // legacy G0 shape
   if (oldIk !== cur.ik) return { status: "changed", verified: !!rec.verified, peerKeys: cur };
   if (!rec.sik) {
-    await set(k(me, peer), { ik: cur.ik, sik: cur.sik, verified: false });
+    await set(k(me, peer), { ik: cur.ik, sik: cur.sik, protoMax, verified: false });
     return { status: "ok", verified: false, upgraded: rec.verified === true, peerKeys: cur };
   }
   if (rec.sik !== cur.sik) return { status: "changed", verified: !!rec.verified, peerKeys: cur };
+  if (cur.protoMax && cur.protoMax !== rec.protoMax) {
+    await set(k(me, peer), { ...rec, protoMax: cur.protoMax });
+  }
   return { status: "ok", verified: !!rec.verified, peerKeys: cur };
 }
 
-export const markVerified = (me, peer, keys) =>
-  set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: true, at: Date.now() });
+export const markVerified = async (me, peer, keys) => {
+  const old = await get(k(me, peer));
+  return set(k(me, peer), { ik: keys.ik, sik: keys.sik, protoMax: keys.protoMax ?? old?.protoMax ?? 1, verified: true, at: Date.now() });
+};
 
-export const markUnverified = (me, peer, keys) =>
-  set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: false });
+export const markUnverified = async (me, peer, keys) => {
+  const old = await get(k(me, peer));
+  return set(k(me, peer), { ik: keys.ik, sik: keys.sik, protoMax: keys.protoMax ?? old?.protoMax ?? 1, verified: false });
+};
 
-export const acceptKeyChange = (me, peer, keys) =>
-  set(k(me, peer), { ik: keys.ik, sik: keys.sik, verified: false });
+export const acceptKeyChange = async (me, peer, keys) => {
+  const old = await get(k(me, peer));
+  return set(k(me, peer), { ik: keys.ik, sik: keys.sik, protoMax: keys.protoMax ?? old?.protoMax ?? 1, verified: false });
+};
 
 // normalized pin, or null. Reads the G0 legacy shape too.
 export async function readPin(me, peer) {
   const r = await get(k(me, peer));
-  return r ? { ik: r.ik ?? r.key, sik: r.sik ?? null, verified: !!r.verified } : null;
+  return r ? { ik: r.ik ?? r.key, sik: r.sik ?? null, verified: !!r.verified, protoMax: r.protoMax ?? 1 } : null;
 }
 

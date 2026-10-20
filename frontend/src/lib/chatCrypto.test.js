@@ -253,6 +253,44 @@ describe("readMessage", () => {
     expect((await readMessage({ me: B, msg: { ...msg, v: 3 } })).state).toBe(UNSUPPORTED_VERSION);
     expect(ax.get).not.toHaveBeenCalled();
   });
+  it("rejects v:1 with UNSUPPORTED_VERSION when an established v2 session exists", async () => {
+    const A = await mkUser(), B = await mkUser();
+    const { payload } = await encryptText({ me: A, peerId: B, text: "v2-msg" });
+    const m1 = wire(A, B, payload);
+    const r1 = await readMessage({ me: B, msg: m1 });
+    expect(r1.state).toBe("ok");
+
+    const v1Msg = {
+      _id: uid(),
+      senderId: A,
+      receiverId: B,
+      v: 1,
+      type: "text",
+      ciphertext: b64(new Uint8Array(272)),
+      nonce: b64(new Uint8Array(12)),
+      header: { ek: b64(new Uint8Array(32)), spkId: 1 },
+    };
+    const r2 = await readMessage({ me: B, msg: v1Msg });
+    expect(r2.state).toBe(UNSUPPORTED_VERSION);
+  });
+  it("rejects v:1 with UNSUPPORTED_VERSION when pin has protoMax >= 2", async () => {
+    const A = await mkUser(), B = await mkUser();
+    const curA = await keysOf(A);
+    await set(`contact:${B}:${A}`, { ik: curA.publicKey, sik: curA.sik, protoMax: 2, verified: false });
+
+    const v1Msg = {
+      _id: uid(),
+      senderId: A,
+      receiverId: B,
+      v: 1,
+      type: "text",
+      ciphertext: b64(new Uint8Array(272)),
+      nonce: b64(new Uint8Array(12)),
+      header: { ek: b64(new Uint8Array(32)), spkId: 1 },
+    };
+    const r2 = await readMessage({ me: B, msg: v1Msg });
+    expect(r2.state).toBe(UNSUPPORTED_VERSION);
+  });
   it("undecryptable when the SPK is gone and nothing is cached", async () => {
     const { B, msg } = await flow();
     await wipeKeyMaterial(B);

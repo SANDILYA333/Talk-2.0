@@ -32,6 +32,9 @@ import {
   loadIdentity,
   saveLocalSystemMessage,
   getLocalSystemMessages,
+  savePendingWire,
+  getPendingWire,
+  delPendingWire,
 } from "../storage/keystore";
 import { acceptKeyChange } from "../lib/safety";
 import { resetIdentity } from "../lib/identity";
@@ -370,13 +373,34 @@ export const useChatStore = create(
         const patch = (p) => set((s) => ({ messages: s.messages.map((m) => (m.cid === cid ? { ...m, ...p } : m)) }));
         try {
           const session = await loadSession(me, peerId);
-          if (!session) {
-            set({ isSettingUpSession: true });
+          let payload;
+          const stored = await getPendingWire(me, cid);
+
+          // If session was reset between failure and retry, discard the payload and send as a new message
+          if (stored) {
+            if (!session || session.sessionId !== stored.sessionId) {
+              await delPendingWire(me, cid);
+            } else {
+              payload = stored.payload;
+            }
           }
-          const { payload, envelope } = await encryptText({ me, peerId, text });
-          set({ isSettingUpSession: false });
+
+          if (!payload) {
+            if (!session) {
+              set({ isSettingUpSession: true });
+            }
+            const enc = await encryptText({ me, peerId, text });
+            set({ isSettingUpSession: false });
+            payload = enc.payload;
+            await savePendingWire(me, cid, {
+              payload,
+              sessionId: payload.header?.sessionId || session?.sessionId,
+            });
+          }
+
           const { data } = await axiosInstance.post(`/messages/send/${peerId}`, { cid, ...payload });
-          await putPlain(me, data._id, { t: envelope.t, body: envelope.body, ts: envelope.ts });
+          await delPendingWire(me, cid);
+          await putPlain(me, data._id, { t: "text", body: text, ts: Date.now() });
           patch({ _id: data._id, createdAt: data.createdAt, state: "ok", failReason: undefined });
 
           // Patch local conversation immediately

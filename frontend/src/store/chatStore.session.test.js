@@ -34,9 +34,10 @@ vi.mock("../lib/axios", () => ({
 
 import { axiosInstance as ax } from "../lib/axios";
 import { useChatStore } from "./useChatStore";
-import { upgradeIdentity, ensureSpk, loadIdentity, generateOpks } from "../storage/keystore";
+import { upgradeIdentity, ensureSpk, loadIdentity, generateOpks, loadSession } from "../storage/keystore";
 import { signIkBinding, toB64 } from "../crypto/index.js";
 import { syncOpks } from "../lib/keyApi.js";
+import { readMessage } from "../lib/chatCrypto.js";
 
 let n = 0;
 const uid = () => (++n).toString(16).padStart(24, "0");
@@ -427,6 +428,183 @@ describe("S8 Integration & Store Sessions", () => {
     expect(msgs.length).toBe(2);
     expect(msgs[1].state).toBe("failed");
     expect(msgs[1].failReason).toBe(PEER_KEY_CHANGED);
+  });
+
+  it("R1.4: fail, then retry: advances ns exactly once, reuses wire payload, and receiver decrypts with zero skipped keys", async () => {
+    const userA = await mkUser();
+    const userB = await mkUser();
+
+    const getBundleOf = async (id, withOpk = false) => {
+      const idn = await loadIdentity(id);
+      const spk = await ensureSpk(id);
+      return {
+        userId: id,
+        ikPub: toB64(idn.ik.pub),
+        sikPub: toB64(idn.sik.pub),
+        ikBinding: toB64(signIkBinding(idn.sik.priv, idn.ik.pub)),
+        spk: { id: spk.id, pub: toB64(spk.pub), sig: toB64(spk.sig) },
+        opk: withOpk && userOpkMap[id] ? { id: userOpkMap[id].id, pub: toB64(userOpkMap[id].pub) } : null,
+        protoMax: 2,
+      };
+    };
+
+    ax.get.mockImplementation(async (url, cfg) => {
+      const mb = url.match(/^\/keys\/bundle\/(.+)$/);
+      if (mb) return { data: await getBundleOf(mb[1], !!cfg?.params?.opk) };
+      const mk = url.match(/^\/identity\/key\/(.+)$/);
+      if (mk) return { data: { publicKey: (await getBundleOf(mk[1])).ikPub, sik: (await getBundleOf(mk[1])).sikPub } };
+      if (url === "/messages/conversations") return { data: [] };
+      throw new Error("unexpected: " + url);
+    });
+
+    currentAuthUserId = userA;
+    useChatStore.setState({
+      messages: [],
+      conversations: [],
+      selectedUser: { _id: userB, fullName: "Bob" },
+      activeConversationId: userB,
+    });
+
+    const postedBodies = [];
+    let shouldFail = true;
+    ax.post.mockImplementation(async (url, body) => {
+      if (url.startsWith("/messages/send/")) {
+        postedBodies.push(JSON.parse(JSON.stringify(body)));
+        if (shouldFail) {
+          throw new Error("Network error");
+        }
+        return {
+          data: {
+            _id: uid(),
+            senderId: userA,
+            receiverId: userB,
+            createdAt: new Date().toISOString(),
+            ...body,
+          },
+        };
+      }
+      throw new Error("unexpected: " + url);
+    });
+
+    // 1. Initial send fails on network
+    await useChatStore.getState().sendMessage("hello retry");
+    const msgs = useChatStore.getState().messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].state).toBe("failed");
+    expect(postedBodies).toHaveLength(1);
+
+    const firstBody = postedBodies[0];
+    const sessionAfterFail = await loadSession(userA, userB);
+    const nsAfterFail = sessionAfterFail.ns;
+
+    // 2. Retry send succeeds
+    shouldFail = false;
+    await useChatStore.getState().retrySend(msgs[0].cid);
+    expect(useChatStore.getState().messages[0].state).toBe("ok");
+    expect(postedBodies).toHaveLength(2);
+
+    const secondBody = postedBodies[1];
+    // Wire payload must be reused
+    expect(secondBody.ciphertext).toBe(firstBody.ciphertext);
+    expect(secondBody.nonce).toBe(firstBody.nonce);
+    expect(secondBody.header.n).toBe(firstBody.header.n);
+
+    // ns advanced exactly once, not twice
+    const sessionAfterRetry = await loadSession(userA, userB);
+    expect(sessionAfterRetry.ns).toBe(nsAfterFail);
+
+    // 3. Receiver decrypts with zero skipped keys
+    const serverMsg = {
+      _id: uid(),
+      senderId: userA,
+      receiverId: userB,
+      ...postedBodies[1],
+    };
+    const readResult = await readMessage({ me: userB, msg: serverMsg });
+    expect(readResult.state).toBe("ok");
+    expect(readResult.text).toBe("hello retry");
+    const bSession = await loadSession(userB, userA);
+    expect(Object.keys(bSession.skippedKeys)).toHaveLength(0);
+  });
+
+  it("R1.4: if session was reset between failure and retry, discards payload and sends as new message", async () => {
+    const userA = await mkUser();
+    const userB = await mkUser();
+
+    const getBundleOf = async (id, withOpk = false) => {
+      const idn = await loadIdentity(id);
+      const spk = await ensureSpk(id);
+      return {
+        userId: id,
+        ikPub: toB64(idn.ik.pub),
+        sikPub: toB64(idn.sik.pub),
+        ikBinding: toB64(signIkBinding(idn.sik.priv, idn.ik.pub)),
+        spk: { id: spk.id, pub: toB64(spk.pub), sig: toB64(spk.sig) },
+        opk: withOpk && userOpkMap[id] ? { id: userOpkMap[id].id, pub: toB64(userOpkMap[id].pub) } : null,
+        protoMax: 2,
+      };
+    };
+
+    ax.get.mockImplementation(async (url, cfg) => {
+      const mb = url.match(/^\/keys\/bundle\/(.+)$/);
+      if (mb) return { data: await getBundleOf(mb[1], !!cfg?.params?.opk) };
+      const mk = url.match(/^\/identity\/key\/(.+)$/);
+      if (mk) return { data: { publicKey: (await getBundleOf(mk[1])).ikPub, sik: (await getBundleOf(mk[1])).sikPub } };
+      if (url === "/messages/conversations") return { data: [] };
+      throw new Error("unexpected: " + url);
+    });
+
+    currentAuthUserId = userA;
+    useChatStore.setState({
+      messages: [],
+      conversations: [],
+      selectedUser: { _id: userB, fullName: "Bob" },
+      activeConversationId: userB,
+    });
+
+    const postedBodies = [];
+    let shouldFail = true;
+    ax.post.mockImplementation(async (url, body) => {
+      if (url.startsWith("/messages/send/")) {
+        postedBodies.push(JSON.parse(JSON.stringify(body)));
+        if (shouldFail) {
+          throw new Error("Network error");
+        }
+        return {
+          data: {
+            _id: uid(),
+            senderId: userA,
+            receiverId: userB,
+            createdAt: new Date().toISOString(),
+            ...body,
+          },
+        };
+      }
+      throw new Error("unexpected: " + url);
+    });
+
+    // 1. Initial send fails on network
+    await useChatStore.getState().sendMessage("hello reset retry");
+    const msgs = useChatStore.getState().messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].state).toBe("failed");
+    expect(postedBodies).toHaveLength(1);
+
+    const firstBody = postedBodies[0];
+
+    // 2. Session is reset
+    await useChatStore.getState().resetSession(userB);
+
+    // 3. Retry send succeeds
+    shouldFail = false;
+    await useChatStore.getState().retrySend(msgs[0].cid);
+    expect(useChatStore.getState().messages[0].state).toBe("ok");
+    expect(postedBodies).toHaveLength(2);
+
+    const secondBody = postedBodies[1];
+    // Since session was reset, payload was discarded and re-encrypted with new session
+    expect(secondBody.header.sessionId).not.toBe(firstBody.header.sessionId);
+    expect(secondBody.ciphertext).not.toBe(firstBody.ciphertext);
   });
 });
 

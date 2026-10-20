@@ -32,6 +32,7 @@ const K = {
   plain: (u, id) => `plain:${u}:${id}`,
   session: (u, peer) => `session:${u}:${peer}`,
   loserSession: (u, peer) => `session-loser:${u}:${peer}`,
+  pendingWire: (u, cid) => `wire:${u}:${cid}`,
 };
 
 async function keysWithPrefix(prefix) {
@@ -171,10 +172,15 @@ export async function loadLoserSession(uid, peerId) {
   return (await get(K.loserSession(uid, peerId))) ?? null;
 }
 
+// ---------- pending wire payloads (for retry without re-encrypting) ----------
+export const savePendingWire = (uid, cid, rec) => set(K.pendingWire(uid, cid), rec);
+export const getPendingWire = async (uid, cid) => (await get(K.pendingWire(uid, cid))) ?? null;
+export const delPendingWire = (uid, cid) => del(K.pendingWire(uid, cid));
+
 // ---------- identity reset ----------
 export function wipeKeyMaterial(uid) {
   return withLock(lockFor(uid), async () => {
-    const prefixes = [`spk:${uid}:`, `opk:${uid}:`, `session:${uid}:`, `session-loser:${uid}:`];
+    const prefixes = [`spk:${uid}:`, `opk:${uid}:`, `session:${uid}:`, `session-loser:${uid}:`, `wire:${uid}:`];
     for (const p of prefixes) for (const k of await keysWithPrefix(p)) await del(k);
     for (const k of [K.spkCur(uid), K.spkNext(uid), K.opkNext(uid)]) await del(k);
   });
